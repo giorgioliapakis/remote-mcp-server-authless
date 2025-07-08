@@ -1,5 +1,14 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+	createInClause,
+	getDaysFromRange,
+	buildDateFilter,
+	BLENDED_SUMMARY_TABLE,
+	getPerformanceRatingCase,
+	safeCpaCalculation,
+	validateAndCleanInput
+} from "./sql-utils";
 
 /**
  * Register the weekly performance report tool - generates comprehensive business intelligence
@@ -18,145 +27,168 @@ export function registerWeeklyReportTool(server: McpServer) {
 				"Countries to analyze. Default: ['US', 'AU', 'UK']. Use ['US'] for US-only analysis, ['AU'] for Australia-only, etc."
 			),
 		},
-		async ({ date_range, platforms, countries }) => {
+		async ({ date_range, platforms, countries }: {
+			date_range: "7d" | "14d" | "30d";
+			platforms: ("Meta" | "Google" | "Bing")[];
+			countries: string[];
+		}) => {
 			try {
-				// Build comprehensive BI query with parameters
+				// Validate and clean inputs
+				const cleanPlatforms = validateAndCleanInput(platforms) as string[];
+				const cleanCountries = validateAndCleanInput(countries) as string[];
+				const analysisDays = getDaysFromRange(date_range);
+				
+				// Build safe SQL components
+				const platformFilter = createInClause(cleanPlatforms, 'platform');
+				const countryFilter = createInClause(cleanCountries, 'country');
+				const dateFilter = buildDateFilter(analysisDays);
+				
+				// Platform target CPAs (hardcoded business rules)
+				const platformTargets = {
+					Meta: 50.0,
+					Google: 25.0,
+					Bing: 25.0
+				};
+
 				const query = `
--- Weekly Business Intelligence Report
--- Aggregated insights to avoid context overload
--- Focus: Platform overview, regional shifts, top issues/opportunities
+-- Weekly Business Intelligence Report - FIXED VERSION
+-- Eliminates subquery aggregation issues and uses safe parameter injection
+-- Focus: Platform overview, regional performance, actionable insights
 
 WITH 
-config AS (
-  SELECT
-    ${date_range === "7d" ? "7" : date_range === "14d" ? "14" : "30"} as analysis_days,
-    ${JSON.stringify(platforms)} as target_platforms,
-    ${JSON.stringify(countries)} as target_countries,
-    -- Thresholds for significance
-    500 as min_spend_threshold,
-    5 as min_conversions_threshold,
-    0.25 as significant_change_threshold,
-    -- Platform targets (AUD)
-    50.0 as meta_target_cpa,
-    25.0 as google_target_cpa,
-    25.0 as bing_target_cpa
-),
-
+-- Step 1: Base performance data with filters applied directly
 base_data AS (
   SELECT
-    platform, country, campaign_objective,
+    platform, 
+    country, 
+    campaign_objective,
     SUM(spend) as total_spend,
     SUM(conversions) as total_conversions,
-    SAFE_DIVIDE(SUM(spend), NULLIF(SUM(conversions), 0)) as blended_cpa,
+    ${safeCpaCalculation('SUM(spend)', 'SUM(conversions)')} as blended_cpa,
     COUNT(DISTINCT campaign_id) as campaign_count
-  FROM \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\`
+  FROM ${BLENDED_SUMMARY_TABLE}
   WHERE 
-    date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT analysis_days FROM config) DAY)
-    AND platform IN UNNEST((SELECT target_platforms FROM config))
-    AND country IN UNNEST((SELECT target_countries FROM config))
+    ${dateFilter}
+    AND ${platformFilter}
+    AND ${countryFilter}
     AND spend > 0
   GROUP BY platform, country, campaign_objective
   HAVING 
-    total_spend >= (SELECT min_spend_threshold FROM config)
-    AND total_conversions >= (SELECT min_conversions_threshold FROM config)
+    total_spend >= 500
+    AND total_conversions >= 5
 ),
 
+-- Step 2: Platform summary with target comparisons
 platform_summary AS (
   SELECT
     platform,
+    -- Platform targets as direct values
     CASE platform 
-      WHEN 'Meta' THEN (SELECT meta_target_cpa FROM config)
-      WHEN 'Google' THEN (SELECT google_target_cpa FROM config) 
-      WHEN 'Bing' THEN (SELECT bing_target_cpa FROM config)
+      WHEN 'Meta' THEN ${platformTargets.Meta}
+      WHEN 'Google' THEN ${platformTargets.Google} 
+      WHEN 'Bing' THEN ${platformTargets.Bing}
+      ELSE 40.0  -- Default target for other platforms
     END as target_cpa,
     SUM(total_spend) as platform_spend,
     SUM(total_conversions) as platform_conversions,
-    SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) as platform_cpa,
+    ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} as platform_cpa,
     SUM(campaign_count) as total_campaigns
   FROM base_data
   GROUP BY platform
 ),
 
+-- Step 3: Regional summary
 regional_summary AS (
   SELECT
     country,
     SUM(total_spend) as country_spend,
     SUM(total_conversions) as country_conversions,
-    SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) as country_cpa,
+    ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} as country_cpa,
     COUNT(DISTINCT platform) as active_platforms
   FROM base_data
   GROUP BY country
 ),
 
+-- Step 4: Performance issues (over target by 20%+)
 performance_issues AS (
   SELECT
-    'OVER_TARGET' as issue_type,
     CONCAT(platform, ' - ', country) as description,
-    blended_cpa as current_value,
+    blended_cpa as current_cpa,
     CASE platform 
-      WHEN 'Meta' THEN (SELECT meta_target_cpa FROM config)
-      WHEN 'Google' THEN (SELECT google_target_cpa FROM config) 
-      WHEN 'Bing' THEN (SELECT bing_target_cpa FROM config)
-    END as target_value,
+      WHEN 'Meta' THEN ${platformTargets.Meta}
+      WHEN 'Google' THEN ${platformTargets.Google} 
+      WHEN 'Bing' THEN ${platformTargets.Bing}
+      ELSE 40.0
+    END as target_cpa,
     total_spend as financial_impact
-  FROM base_data bd
+  FROM base_data
   WHERE blended_cpa > CASE platform 
-    WHEN 'Meta' THEN (SELECT meta_target_cpa FROM config) * 1.2
-    WHEN 'Google' THEN (SELECT google_target_cpa FROM config) * 1.2 
-    WHEN 'Bing' THEN (SELECT bing_target_cpa FROM config) * 1.2
+    WHEN 'Meta' THEN ${platformTargets.Meta} * 1.2
+    WHEN 'Google' THEN ${platformTargets.Google} * 1.2 
+    WHEN 'Bing' THEN ${platformTargets.Bing} * 1.2
+    ELSE 40.0 * 1.2
   END
   ORDER BY total_spend DESC
   LIMIT 5
 ),
 
+-- Step 5: Scale opportunities (performing well under target)
 opportunities AS (
   SELECT
-    'STRONG_PERFORMER' as opportunity_type,
     CONCAT(platform, ' - ', country, ' - ', campaign_objective) as description,
-    blended_cpa as current_value,
+    blended_cpa as current_cpa,
     CASE platform 
-      WHEN 'Meta' THEN (SELECT meta_target_cpa FROM config)
-      WHEN 'Google' THEN (SELECT google_target_cpa FROM config) 
-      WHEN 'Bing' THEN (SELECT bing_target_cpa FROM config)
-    END as target_value,
+      WHEN 'Meta' THEN ${platformTargets.Meta}
+      WHEN 'Google' THEN ${platformTargets.Google} 
+      WHEN 'Bing' THEN ${platformTargets.Bing}
+      ELSE 40.0
+    END as target_cpa,
     total_spend as current_spend,
-    -- Scale potential calculation
+    -- Conservative scale potential calculation
     CASE 
-      WHEN total_spend < 500 THEN total_spend * 1.0
-      WHEN total_spend < 1500 THEN total_spend * 0.5
-      ELSE total_spend * 0.2
+      WHEN total_spend < 500 THEN ROUND(total_spend * 1.0, 0)
+      WHEN total_spend < 1500 THEN ROUND(total_spend * 0.5, 0)
+      ELSE ROUND(total_spend * 0.2, 0)
     END as scale_potential
-  FROM base_data bd
+  FROM base_data
   WHERE blended_cpa <= CASE platform 
-    WHEN 'Meta' THEN (SELECT meta_target_cpa FROM config) * 0.8
-    WHEN 'Google' THEN (SELECT google_target_cpa FROM config) * 0.8 
-    WHEN 'Bing' THEN (SELECT bing_target_cpa FROM config) * 0.8
+    WHEN 'Meta' THEN ${platformTargets.Meta} * 0.8
+    WHEN 'Google' THEN ${platformTargets.Google} * 0.8 
+    WHEN 'Bing' THEN ${platformTargets.Bing} * 0.8
+    ELSE 40.0 * 0.8
   END
   ORDER BY scale_potential DESC
   LIMIT 5
 )
 
--- Output summarized results
+-- Output 1: Platform Overview
 SELECT 
   'PLATFORM_OVERVIEW' as section,
   JSON_OBJECT(
-    'analysis_period', CONCAT((SELECT analysis_days FROM config), ' days'),
-    'platforms_analyzed', (SELECT target_platforms FROM config),
-    'countries_analyzed', (SELECT target_countries FROM config),
+    'analysis_period', '${date_range} (${analysisDays} days)',
+    'platforms_analyzed', ARRAY[${cleanPlatforms.map(p => `'${p.replace(/'/g, "\\'")}'`).join(', ')}],
+    'countries_analyzed', ARRAY[${cleanCountries.map(c => `'${c.replace(/'/g, "\\'")}'`).join(', ')}],
     'platform_performance', ARRAY_AGG(JSON_OBJECT(
       'platform', platform,
       'spend', ROUND(platform_spend, 2),
       'conversions', platform_conversions,
       'cpa', ROUND(platform_cpa, 2),
       'target_cpa', target_cpa,
-      'vs_target', ROUND((platform_cpa - target_cpa) / target_cpa * 100, 1),
-      'campaigns', total_campaigns
+      'vs_target_pct', ROUND((platform_cpa - target_cpa) / target_cpa * 100, 1),
+      'campaigns', total_campaigns,
+      'status', CASE 
+        WHEN platform_cpa <= target_cpa * 0.8 THEN 'EXCELLENT'
+        WHEN platform_cpa <= target_cpa THEN 'ON_TARGET'
+        WHEN platform_cpa <= target_cpa * 1.2 THEN 'ACCEPTABLE'
+        ELSE 'NEEDS_ATTENTION'
+      END
     ))
   ) as summary_data
 FROM platform_summary
 
 UNION ALL
 
+-- Output 2: Regional Overview
 SELECT 
   'REGIONAL_OVERVIEW' as section,
   JSON_OBJECT(
@@ -165,38 +197,41 @@ SELECT
       'spend', ROUND(country_spend, 2),
       'conversions', country_conversions,
       'cpa', ROUND(country_cpa, 2),
-      'active_platforms', active_platforms
-    ))
+      'active_platforms', active_platforms,
+      'efficiency_rank', RANK() OVER (ORDER BY country_cpa ASC)
+    ) ORDER BY country_spend DESC)
   ) as summary_data
 FROM regional_summary
 
 UNION ALL
 
+-- Output 3: Performance Issues
 SELECT 
   'TOP_ISSUES' as section,
   JSON_OBJECT(
     'performance_issues', ARRAY_AGG(JSON_OBJECT(
-      'type', issue_type,
       'description', description,
-      'current_cpa', ROUND(current_value, 2),
-      'target_cpa', target_value,
-      'overspend_impact', ROUND(financial_impact, 2)
+      'current_cpa', ROUND(current_cpa, 2),
+      'target_cpa', target_cpa,
+      'overspend_pct', ROUND((current_cpa - target_cpa) / target_cpa * 100, 1),
+      'financial_impact', ROUND(financial_impact, 2)
     ))
   ) as summary_data
 FROM performance_issues
 
 UNION ALL
 
+-- Output 4: Scale Opportunities
 SELECT 
   'SCALE_OPPORTUNITIES' as section,
   JSON_OBJECT(
     'opportunities', ARRAY_AGG(JSON_OBJECT(
-      'type', opportunity_type,
       'description', description,
-      'current_cpa', ROUND(current_value, 2),
-      'target_cpa', target_value,
+      'current_cpa', ROUND(current_cpa, 2),
+      'target_cpa', target_cpa,
+      'efficiency_margin', ROUND((target_cpa - current_cpa) / target_cpa * 100, 1),
       'current_spend', ROUND(current_spend, 2),
-      'additional_spend_potential', ROUND(scale_potential, 2)
+      'additional_spend_potential', scale_potential
     ))
   ) as summary_data
 FROM opportunities
@@ -231,7 +266,7 @@ ORDER BY section;
 				return {
 					content: [{
 						type: "text",
-						text: `Weekly Performance Report (${date_range} analysis)\nPlatforms: ${platforms.join(', ')}\nCountries: ${countries.join(', ')}\n\nResults:\n${data}`
+						text: `Weekly Performance Report (${date_range} analysis)\nPlatforms: ${cleanPlatforms.join(', ')}\nCountries: ${cleanCountries.join(', ')}\n\nResults:\n${data}`
 					}]
 				};
 			} catch (error) {

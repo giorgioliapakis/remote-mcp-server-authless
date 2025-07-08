@@ -16,6 +16,9 @@ export { registerCreativeAnalysisTool } from "./creative-analysis";
 export { registerRegionalComparisonTool } from "./regional-comparison";
 export { registerFlexibleQueryTool } from "./get-performance";
 
+// Export SQL utilities for direct use if needed
+export * from "./sql-utils";
+
 /**
  * Register all tools with the server
  */
@@ -24,7 +27,7 @@ export function registerAllTools(server: McpServer) {
 	registerAddTool(server);
 	registerCalculatorTool(server);
 	
-	// Analytics template tools (prioritized by LLM)
+	// Analytics template tools (prioritized by LLM) - now with fixed SQL
 	registerWeeklyReportTool(server);
 	registerCampaignAnalysisTool(server);
 	registerCreativeAnalysisTool(server);

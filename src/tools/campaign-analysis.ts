@@ -1,5 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+	createCampaignMatchConditions,
+	getComparisonDays,
+	buildDateFilter,
+	buildComparisonDateFilter,
+	BLENDED_SUMMARY_TABLE,
+	getPerformanceRatingCase,
+	safeCpaCalculation,
+	safeCtrCalculation,
+	safeCvrCalculation,
+	validateAndCleanInput
+} from "./sql-utils";
 
 /**
  * Register the campaign analysis tool - deep dive into specific campaign performance
@@ -18,45 +30,44 @@ export function registerCampaignAnalysisTool(server: McpServer) {
 				"Include creative-level analysis for Meta campaigns. Set true when user asks about 'ads', 'creatives', or 'creative performance'"
 			),
 		},
-		async ({ campaign_names, comparison_period, include_creatives }) => {
+		async ({ campaign_names, comparison_period, include_creatives }: {
+			campaign_names: string[];
+			comparison_period: "week_over_week" | "month_over_month";
+			include_creatives: boolean;
+		}) => {
 			try {
+				// Validate and clean inputs
+				const cleanCampaignNames = validateAndCleanInput(campaign_names) as string[];
+				
+				// Get period configuration
+				const { current: currentDays, comparison: comparisonDays } = getComparisonDays(comparison_period);
+				
+				// Build safe SQL components
+				const campaignMatchCondition = createCampaignMatchConditions(cleanCampaignNames);
+				const currentDateFilter = buildDateFilter(currentDays);
+				const comparisonDateFilter = buildComparisonDateFilter(currentDays, comparisonDays);
+				
 				const query = `
--- Campaign Deep Dive Analysis - READABLE FORMAT
--- Executive summary + grouped insights to reduce cognitive load
--- Only detailed breakdowns for problem areas
+-- Campaign Deep Dive Analysis - FIXED VERSION
+-- Eliminates subquery aggregation issues by using direct values instead of CTEs
+-- Safe parameter injection and simplified structure
 
 WITH 
-config AS (
-  SELECT
-    ${JSON.stringify(campaign_names)} as target_campaigns,
-    '${comparison_period}' as comparison_type,
-    ${include_creatives} as include_creative_analysis,
-    -- Period definitions
-    CASE '${comparison_period}'
-      WHEN 'week_over_week' THEN 7
-      WHEN 'month_over_month' THEN 30
-    END as current_period_days,
-    CASE '${comparison_period}'
-      WHEN 'week_over_week' THEN 14  -- Previous 7 days
-      WHEN 'month_over_month' THEN 60  -- Previous 30 days
-    END as comparison_period_days
-),
-
+-- Step 1: Find matching campaigns (simplified, no config CTE)
 campaign_matches AS (
   SELECT DISTINCT
     campaign_id,
     campaign,
     platform,
     country
-  FROM \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\`
+  FROM ${BLENDED_SUMMARY_TABLE}
   WHERE 
-    date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT comparison_period_days FROM config) DAY)
-    AND (
-      ${campaign_names.map(name => `LOWER(campaign) LIKE LOWER('%${name}%')`).join(' OR ')}
-    )
+    ${buildDateFilter(comparisonDays)}
+    AND ${campaignMatchCondition}
     AND spend > 0
 ),
 
+-- Step 2: Current period performance
 current_period_data AS (
   SELECT
     cm.campaign_id,
@@ -65,34 +76,31 @@ current_period_data AS (
     cm.country,
     SUM(bd.spend) as spend_current,
     SUM(bd.conversions) as conversions_current,
-    SAFE_DIVIDE(SUM(bd.spend), NULLIF(SUM(bd.conversions), 0)) as cpa_current,
-    SAFE_DIVIDE(SUM(bd.clicks), NULLIF(SUM(bd.impressions), 0)) * 100 as ctr_current,
-    SAFE_DIVIDE(SUM(bd.conversions), NULLIF(SUM(bd.clicks), 0)) * 100 as cvr_current
+    ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} as cpa_current,
+    ${safeCtrCalculation('SUM(bd.clicks)', 'SUM(bd.impressions)')} as ctr_current,
+    ${safeCvrCalculation('SUM(bd.conversions)', 'SUM(bd.clicks)')} as cvr_current
   FROM campaign_matches cm
-  JOIN \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\` bd
-    ON cm.campaign_id = bd.campaign_id
-  WHERE 
-    bd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT current_period_days FROM config) DAY)
+  JOIN ${BLENDED_SUMMARY_TABLE} bd ON cm.campaign_id = bd.campaign_id
+  WHERE ${buildDateFilter(currentDays, 'bd')}
   GROUP BY cm.campaign_id, cm.campaign, cm.platform, cm.country
 ),
 
+-- Step 3: Comparison period performance
 comparison_period_data AS (
   SELECT
     cm.campaign_id,
     SUM(bd.spend) as spend_comparison,
     SUM(bd.conversions) as conversions_comparison,
-    SAFE_DIVIDE(SUM(bd.spend), NULLIF(SUM(bd.conversions), 0)) as cpa_comparison,
-    SAFE_DIVIDE(SUM(bd.clicks), NULLIF(SUM(bd.impressions), 0)) * 100 as ctr_comparison,
-    SAFE_DIVIDE(SUM(bd.conversions), NULLIF(SUM(bd.clicks), 0)) * 100 as cvr_comparison
+    ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} as cpa_comparison,
+    ${safeCtrCalculation('SUM(bd.clicks)', 'SUM(bd.impressions)')} as ctr_comparison,
+    ${safeCvrCalculation('SUM(bd.conversions)', 'SUM(bd.clicks)')} as cvr_comparison
   FROM campaign_matches cm
-  JOIN \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\` bd
-    ON cm.campaign_id = bd.campaign_id
-  WHERE 
-    bd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT comparison_period_days FROM config) DAY)
-    AND bd.date < DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT current_period_days FROM config) DAY)
+  JOIN ${BLENDED_SUMMARY_TABLE} bd ON cm.campaign_id = bd.campaign_id
+  WHERE ${comparisonDateFilter.replace('date >', 'bd.date >')}
   GROUP BY cm.campaign_id
 ),
 
+-- Step 4: Combined performance with classifications
 campaign_performance AS (
   SELECT
     cp.*,
@@ -101,213 +109,131 @@ campaign_performance AS (
     comp.cpa_comparison,
     comp.ctr_comparison,
     comp.cvr_comparison,
-    -- Calculate changes
-    SAFE_DIVIDE((cp.cpa_current - comp.cpa_comparison), NULLIF(comp.cpa_comparison, 0)) * 100 as cpa_change_pct,
-    SAFE_DIVIDE((cp.ctr_current - comp.ctr_comparison), NULLIF(comp.ctr_comparison, 0)) * 100 as ctr_change_pct,
-    SAFE_DIVIDE((cp.cvr_current - comp.cvr_comparison), NULLIF(comp.cvr_comparison, 0)) * 100 as cvr_change_pct,
+    -- Calculate changes safely
+    CASE 
+      WHEN comp.cpa_comparison IS NOT NULL AND comp.cpa_comparison > 0 THEN
+        ROUND((cp.cpa_current - comp.cpa_comparison) / comp.cpa_comparison * 100, 1)
+      ELSE NULL
+    END as cpa_change_pct,
+    CASE 
+      WHEN comp.ctr_comparison IS NOT NULL AND comp.ctr_comparison > 0 THEN
+        ROUND((cp.ctr_current - comp.ctr_comparison) / comp.ctr_comparison * 100, 1)
+      ELSE NULL
+    END as ctr_change_pct,
+    CASE 
+      WHEN comp.cvr_comparison IS NOT NULL AND comp.cvr_comparison > 0 THEN
+        ROUND((cp.cvr_current - comp.cvr_comparison) / comp.cvr_comparison * 100, 1)
+      ELSE NULL
+    END as cvr_change_pct,
     -- Performance classification
-    CASE
-      WHEN cp.cpa_current <= 25 THEN 'EXCELLENT'
-      WHEN cp.cpa_current <= 40 THEN 'GOOD'
-      WHEN cp.cpa_current <= 60 THEN 'ACCEPTABLE'
-      ELSE 'NEEDS_ATTENTION'
-    END as performance_rating
+    ${getPerformanceRatingCase('cp.cpa_current')} as performance_rating
   FROM current_period_data cp
   LEFT JOIN comparison_period_data comp ON cp.campaign_id = comp.campaign_id
-),
-
-executive_summary AS (
-  SELECT
-    COUNT(*) as total_campaigns,
-    SUM(spend_current) as total_spend,
-    SUM(conversions_current) as total_conversions,
-    SAFE_DIVIDE(SUM(spend_current), NULLIF(SUM(conversions_current), 0)) as blended_cpa,
-    -- Performance breakdown
-    COUNTIF(performance_rating = 'EXCELLENT') as excellent_count,
-    COUNTIF(performance_rating = 'GOOD') as good_count,
-    COUNTIF(performance_rating = 'ACCEPTABLE') as acceptable_count,
-    COUNTIF(performance_rating = 'NEEDS_ATTENTION') as needs_attention_count,
-    -- Platform breakdown
-    COUNTIF(platform = 'Meta') as meta_count,
-    COUNTIF(platform = 'Google') as google_count,
-    COUNTIF(platform = 'tiktok') as tiktok_count,
-    -- Country breakdown
-    COUNTIF(country = 'US') as us_count,
-    COUNTIF(country = 'UK') as uk_count,
-    COUNTIF(country = 'CA') as ca_count,
-    COUNTIF(country = 'AU') as au_count
-  FROM campaign_performance
-),
-
-platform_groups AS (
-  SELECT
-    platform,
-    performance_rating,
-    COUNT(*) as campaign_count,
-    ROUND(SUM(spend_current), 0) as group_spend,
-    ROUND(SUM(conversions_current), 0) as group_conversions,
-    ROUND(SAFE_DIVIDE(SUM(spend_current), NULLIF(SUM(conversions_current), 0)), 2) as group_cpa,
-    -- Best and worst performers in group
-    STRING_AGG(
-      CASE WHEN performance_rating = 'NEEDS_ATTENTION' 
-      THEN CONCAT(SUBSTR(campaign, 1, 50), '... ($', CAST(ROUND(spend_current) AS STRING), ', CPA: $', CAST(ROUND(cpa_current, 2) AS STRING), ')')
-      END, 
-      ' | ' 
-      LIMIT 3
-    ) as problem_campaigns
-  FROM campaign_performance
-  GROUP BY platform, performance_rating
-),
-
-creative_analysis AS (
-  SELECT
-    bd.campaign_id,
-    bd.ad_name,
-    -- Parse Meta creative components
-    CASE 
-      WHEN bd.platform = 'Meta' AND bd.ad_name IS NOT NULL THEN
-        TRIM(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(0)])
-      ELSE NULL
-    END as creative_concept,
-    SUM(bd.spend) as creative_spend,
-    SUM(bd.conversions) as creative_conversions,
-    SAFE_DIVIDE(SUM(bd.spend), NULLIF(SUM(bd.conversions), 0)) as creative_cpa
-  FROM \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\` bd
-  WHERE 
-    bd.campaign_id IN (SELECT campaign_id FROM campaign_matches)
-    AND bd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT current_period_days FROM config) DAY)
-    AND bd.platform = 'Meta'
-    AND (SELECT include_creative_analysis FROM config) = true
-  GROUP BY bd.campaign_id, bd.ad_name, creative_concept
-  HAVING creative_spend >= 100 AND creative_conversions >= 2
-  ORDER BY creative_cpa ASC
-  LIMIT 10
 )
 
--- 1. EXECUTIVE SUMMARY
+-- Output 1: Executive Summary
 SELECT 
   'EXECUTIVE_SUMMARY' as section,
   JSON_OBJECT(
-    'analysis_type', (SELECT comparison_type FROM config),
-    'search_terms', (SELECT target_campaigns FROM config),
-    'totals', JSON_OBJECT(
-      'campaigns', (SELECT total_campaigns FROM executive_summary),
-      'spend', (SELECT ROUND(total_spend, 2) FROM executive_summary),
-      'conversions', (SELECT total_conversions FROM executive_summary),
-      'blended_cpa', (SELECT ROUND(blended_cpa, 2) FROM executive_summary)
+    'analysis_type', '${comparison_period}',
+    'search_terms', ARRAY[${cleanCampaignNames.map(name => `'${name.replace(/'/g, "\\'")}'`).join(', ')}],
+    'period_days', ${currentDays},
+    'total_campaigns', COUNT(*),
+    'total_spend', ROUND(SUM(spend_current), 2),
+    'total_conversions', SUM(conversions_current),
+    'blended_cpa', ROUND(${safeCpaCalculation('SUM(spend_current)', 'SUM(conversions_current)')}, 2),
+    'performance_breakdown', JSON_OBJECT(
+      'excellent', COUNT(CASE WHEN performance_rating = 'EXCELLENT' THEN 1 END),
+      'good', COUNT(CASE WHEN performance_rating = 'GOOD' THEN 1 END),
+      'acceptable', COUNT(CASE WHEN performance_rating = 'ACCEPTABLE' THEN 1 END),
+      'needs_attention', COUNT(CASE WHEN performance_rating = 'NEEDS_ATTENTION' THEN 1 END)
     ),
-    'performance_distribution', JSON_OBJECT(
-      'excellent', (SELECT excellent_count FROM executive_summary),
-      'good', (SELECT good_count FROM executive_summary), 
-      'acceptable', (SELECT acceptable_count FROM executive_summary),
-      'needs_attention', (SELECT needs_attention_count FROM executive_summary)
-    ),
-    'platform_distribution', JSON_OBJECT(
-      'meta', (SELECT meta_count FROM executive_summary),
-      'google', (SELECT google_count FROM executive_summary),
-      'tiktok', (SELECT tiktok_count FROM executive_summary)
-    ),
-    'country_distribution', JSON_OBJECT(
-      'us', (SELECT us_count FROM executive_summary),
-      'uk', (SELECT uk_count FROM executive_summary),
-      'ca', (SELECT ca_count FROM executive_summary),
-      'au', (SELECT au_count FROM executive_summary)
+    'platform_breakdown', JSON_OBJECT(
+      'meta', COUNT(CASE WHEN platform = 'Meta' THEN 1 END),
+      'google', COUNT(CASE WHEN platform = 'Google' THEN 1 END),
+      'tiktok', COUNT(CASE WHEN platform = 'tiktok' THEN 1 END),
+      'other', COUNT(CASE WHEN platform NOT IN ('Meta', 'Google', 'tiktok') THEN 1 END)
     )
   ) as summary_data
+FROM campaign_performance
 
 UNION ALL
 
--- 2. PLATFORM PERFORMANCE GROUPS
+-- Output 2: Problem Campaigns (High spend, poor performance)
 SELECT 
-  'PLATFORM_PERFORMANCE' as section,
+  'PROBLEM_CAMPAIGNS' as section,
   JSON_OBJECT(
-    'platform_groups', ARRAY_AGG(JSON_OBJECT(
-      'platform', platform,
-      'performance_tier', performance_rating,
-      'campaign_count', campaign_count,
-      'total_spend', group_spend,
-      'total_conversions', group_conversions,
-      'avg_cpa', group_cpa,
-      'sample_problem_campaigns', CASE WHEN performance_rating = 'NEEDS_ATTENTION' THEN problem_campaigns ELSE NULL END
-    ))
-  ) as summary_data
-FROM platform_groups
-
-UNION ALL
-
--- 3. DETAILED CAMPAIGN DATA (Only for problem campaigns)
-SELECT 
-  'PROBLEM_CAMPAIGNS_DETAIL' as section,
-  JSON_OBJECT(
-    'campaigns_needing_attention', ARRAY_AGG(JSON_OBJECT(
-      'campaign_name', campaign,
-      'platform', platform,
-      'country', country,
-      'current_period', JSON_OBJECT(
-        'spend', ROUND(spend_current, 2),
-        'conversions', conversions_current,
-        'cpa', ROUND(cpa_current, 2),
-        'ctr', ROUND(ctr_current, 2),
-        'cvr', ROUND(cvr_current, 2)
-      ),
-      'comparison_period', JSON_OBJECT(
-        'spend', ROUND(COALESCE(spend_comparison, 0), 2),
-        'conversions', COALESCE(conversions_comparison, 0),
-        'cpa', ROUND(COALESCE(cpa_comparison, 0), 2)
-      ),
-      'changes', JSON_OBJECT(
-        'cpa_change_pct', ROUND(COALESCE(cpa_change_pct, 0), 1),
-        'ctr_change_pct', ROUND(COALESCE(ctr_change_pct, 0), 1),
-        'cvr_change_pct', ROUND(COALESCE(cvr_change_pct, 0), 1)
-      ),
-      'performance_rating', performance_rating
-    ))
+    'campaigns_needing_attention', ARRAY_AGG(
+      JSON_OBJECT(
+        'campaign_name', SUBSTR(campaign, 1, 80),
+        'platform', platform,
+        'country', country,
+        'current_spend', ROUND(spend_current, 2),
+        'current_conversions', conversions_current,
+        'current_cpa', ROUND(cpa_current, 2),
+        'comparison_cpa', ROUND(COALESCE(cpa_comparison, 0), 2),
+        'cpa_change_pct', COALESCE(cpa_change_pct, 0),
+        'performance_rating', performance_rating
+      ) ORDER BY spend_current DESC
+    )
   ) as summary_data
 FROM campaign_performance
 WHERE performance_rating = 'NEEDS_ATTENTION'
-ORDER BY spend_current DESC
-LIMIT 15
+   OR (spend_current > 1000 AND cpa_current > 50)
 
 UNION ALL
 
--- 4. TOP PERFORMERS (Brief list)
+-- Output 3: Top Performers (Scale opportunities)
 SELECT 
   'TOP_PERFORMERS' as section,
   JSON_OBJECT(
-    'excellent_campaigns', ARRAY_AGG(JSON_OBJECT(
-      'campaign_name', SUBSTR(campaign, 1, 80),
-      'platform', platform,
-      'country', country,
-      'cpa', ROUND(cpa_current, 2),
-      'spend', ROUND(spend_current, 2),
-      'conversions', conversions_current
-    ))
+    'excellent_campaigns', ARRAY_AGG(
+      JSON_OBJECT(
+        'campaign_name', SUBSTR(campaign, 1, 80),
+        'platform', platform,
+        'country', country,
+        'spend', ROUND(spend_current, 2),
+        'conversions', conversions_current,
+        'cpa', ROUND(cpa_current, 2),
+        'cpa_change_pct', COALESCE(cpa_change_pct, 0)
+      ) ORDER BY spend_current DESC
+    )
   ) as summary_data
 FROM campaign_performance
-WHERE performance_rating = 'EXCELLENT'
-ORDER BY spend_current DESC
+WHERE performance_rating IN ('EXCELLENT', 'GOOD')
+  AND spend_current >= 200
 LIMIT 10
 
+${include_creatives ? `
 UNION ALL
 
--- 5. CREATIVE ANALYSIS (if requested)
+-- Output 4: Creative Analysis (if requested)
 SELECT 
   'CREATIVE_ANALYSIS' as section,
   JSON_OBJECT(
-    'note', CASE WHEN (SELECT include_creative_analysis FROM config) THEN 'Meta creative performance included' ELSE 'Creative analysis not requested' END,
-    'top_creatives', CASE 
-      WHEN (SELECT include_creative_analysis FROM config) THEN
-        ARRAY_AGG(JSON_OBJECT(
-          'ad_name', ad_name,
-          'creative_concept', creative_concept,
-          'spend', ROUND(creative_spend, 2),
-          'conversions', creative_conversions,
-          'cpa', ROUND(creative_cpa, 2)
-        ))
-      ELSE []
-    END
+    'note', 'Meta creative performance analysis included',
+    'top_creatives', ARRAY_AGG(
+      JSON_OBJECT(
+        'ad_name', SUBSTR(bd.ad_name, 1, 100),
+        'creative_concept', CASE 
+          WHEN bd.ad_name IS NOT NULL THEN SUBSTR(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(0)], 1, 50)
+          ELSE 'Unknown'
+        END,
+        'spend', ROUND(SUM(bd.spend), 2),
+        'conversions', SUM(bd.conversions),
+        'cpa', ROUND(${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')}, 2)
+      ) ORDER BY ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} ASC
+    )
   ) as summary_data
-FROM creative_analysis
+FROM campaign_matches cm
+JOIN ${BLENDED_SUMMARY_TABLE} bd ON cm.campaign_id = bd.campaign_id
+WHERE ${buildDateFilter(currentDays, 'bd')}
+  AND bd.platform = 'Meta'
+  AND bd.ad_name IS NOT NULL
+GROUP BY bd.ad_name
+HAVING SUM(bd.spend) >= 100 AND SUM(bd.conversions) >= 2
+LIMIT 10
+` : ''}
 
 ORDER BY section;
 `;
@@ -339,7 +265,7 @@ ORDER BY section;
 				return {
 					content: [{
 						type: "text",
-						text: `Campaign Analysis (${comparison_period})\nSearch terms: ${campaign_names.join(', ')}\nCreative analysis: ${include_creatives ? 'Included' : 'Not included'}\n\nResults:\n${data}`
+						text: `Campaign Analysis (${comparison_period})\nSearch terms: ${cleanCampaignNames.join(', ')}\nCreative analysis: ${include_creatives ? 'Included' : 'Not included'}\n\nResults:\n${data}`
 					}]
 				};
 			} catch (error) {

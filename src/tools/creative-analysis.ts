@@ -1,5 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+	createInClause,
+	getDaysFromRange,
+	buildDateFilter,
+	BLENDED_SUMMARY_TABLE,
+	getPerformanceRatingCase,
+	safeCpaCalculation,
+	safeCtrCalculation,
+	safeCvrCalculation,
+	validateAndCleanInput
+} from "./sql-utils";
 
 /**
  * Register the creative analysis tool - Meta creative performance insights
@@ -21,83 +32,94 @@ export function registerCreativeAnalysisTool(server: McpServer) {
 				"Sort creatives by: 'cpa' for efficiency, 'spend' for scale, 'conversions' for volume"
 			),
 		},
-		async ({ date_range, countries, min_spend, sort_by }) => {
+		async ({ date_range, countries, min_spend, sort_by }: {
+			date_range: "7d" | "14d" | "30d";
+			countries: string[];
+			min_spend: number;
+			sort_by: "cpa" | "spend" | "conversions";
+		}) => {
 			try {
+				// Validate and clean inputs
+				const cleanCountries = validateAndCleanInput(countries) as string[];
+				const analysisDays = getDaysFromRange(date_range);
+				const safeMinSpend = Math.max(50, Math.min(min_spend, 10000)); // Constrain min_spend
+				
+				// Build safe SQL components
+				const countryFilter = createInClause(cleanCountries, 'country');
+				const dateFilter = buildDateFilter(analysisDays);
+				
 				const query = `
--- Meta Creative Performance Analysis
--- Summarized creative insights to avoid context overload
--- Focus on concept patterns and performance distribution
+-- Meta Creative Performance Analysis - FIXED VERSION
+-- Eliminates subquery aggregation issues and uses safe parameter handling
+-- Focus on creative concept patterns and performance distribution
 
 WITH 
-config AS (
-  SELECT
-    ${date_range === "7d" ? "7" : date_range === "14d" ? "14" : "30"} as analysis_days,
-    ${JSON.stringify(countries)} as target_countries,
-    ${min_spend} as min_spend_threshold,
-    '${sort_by}' as sort_metric
-),
-
+-- Step 1: Creative data with safe parsing and filtering
 creative_data AS (
   SELECT
-    bd.ad_id,
-    bd.ad_name,
-    bd.country,
-    -- Parse Meta creative components
+    ad_id,
+    ad_name,
+    country,
+    -- Parse Meta creative components safely
     CASE 
-      WHEN bd.ad_name IS NOT NULL THEN
-        TRIM(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(0)])
+      WHEN ad_name IS NOT NULL AND STRPOS(ad_name, ' // ') > 0 THEN
+        TRIM(SPLIT(ad_name, ' // ')[SAFE_OFFSET(0)])
+      WHEN ad_name IS NOT NULL THEN
+        SUBSTR(ad_name, 1, 50)  -- Fallback for non-standard format
       ELSE 'Unknown_Concept'
     END as creative_concept,
     CASE 
-      WHEN bd.ad_name IS NOT NULL THEN
-        TRIM(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(2)])
+      WHEN ad_name IS NOT NULL AND ARRAY_LENGTH(SPLIT(ad_name, ' // ')) > 2 THEN
+        TRIM(SPLIT(ad_name, ' // ')[SAFE_OFFSET(2)])
       ELSE NULL
     END as creative_format,
     CASE 
-      WHEN bd.ad_name IS NOT NULL THEN
-        TRIM(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(3)])
+      WHEN ad_name IS NOT NULL AND ARRAY_LENGTH(SPLIT(ad_name, ' // ')) > 3 THEN
+        TRIM(SPLIT(ad_name, ' // ')[SAFE_OFFSET(3)])
       ELSE NULL
     END as creative_creator,
-    SUM(bd.spend) as total_spend,
-    SUM(bd.conversions) as total_conversions,
-    SAFE_DIVIDE(SUM(bd.spend), NULLIF(SUM(bd.conversions), 0)) as cpa,
-    SAFE_DIVIDE(SUM(bd.clicks), NULLIF(SUM(bd.impressions), 0)) * 100 as ctr,
-    SAFE_DIVIDE(SUM(bd.conversions), NULLIF(SUM(bd.clicks), 0)) * 100 as cvr
-  FROM \`exemplary-terra-463404-m1.linktree_analytics.blended_summary\` bd
+    SUM(spend) as total_spend,
+    SUM(conversions) as total_conversions,
+    ${safeCpaCalculation('SUM(spend)', 'SUM(conversions)')} as cpa,
+    ${safeCtrCalculation('SUM(clicks)', 'SUM(impressions)')} as ctr,
+    ${safeCvrCalculation('SUM(conversions)', 'SUM(clicks)')} as cvr
+  FROM ${BLENDED_SUMMARY_TABLE}
   WHERE 
-    bd.date >= DATE_SUB(CURRENT_DATE(), INTERVAL (SELECT analysis_days FROM config) DAY)
-    AND bd.platform = 'Meta'
-    AND bd.country IN UNNEST((SELECT target_countries FROM config))
-    AND bd.spend > 0
+    ${dateFilter}
+    AND platform = 'Meta'
+    AND ${countryFilter}
+    AND spend > 0
   GROUP BY 
-    bd.ad_id, bd.ad_name, bd.country, creative_concept, creative_format, creative_creator
+    ad_id, ad_name, country, creative_concept, creative_format, creative_creator
   HAVING 
-    total_spend >= (SELECT min_spend_threshold FROM config)
+    total_spend >= ${safeMinSpend}
     AND total_conversions >= 2
 ),
 
+-- Step 2: Concept-level summary with performance classification
 concept_summary AS (
   SELECT
     creative_concept,
     COUNT(*) as ad_count,
     SUM(total_spend) as concept_spend,
     SUM(total_conversions) as concept_conversions,
-    SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) as concept_cpa,
+    ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} as concept_cpa,
     AVG(ctr) as avg_ctr,
     AVG(cvr) as avg_cvr,
-    -- Performance classification
+    -- Performance classification using safe CPA calculation
     CASE
-      WHEN SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) <= 25 THEN 'EXCELLENT'
-      WHEN SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) <= 40 THEN 'GOOD'
-      WHEN SAFE_DIVIDE(SUM(total_spend), NULLIF(SUM(total_conversions), 0)) <= 60 THEN 'ACCEPTABLE'
+      WHEN ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} <= 25 THEN 'EXCELLENT'
+      WHEN ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} <= 40 THEN 'GOOD'
+      WHEN ${safeCpaCalculation('SUM(total_spend)', 'SUM(total_conversions)')} <= 60 THEN 'ACCEPTABLE'
       ELSE 'NEEDS_ATTENTION'
     END as performance_tier
   FROM creative_data
   WHERE creative_concept IS NOT NULL
   GROUP BY creative_concept
-  HAVING concept_spend >= (SELECT min_spend_threshold FROM config) * 2
+  HAVING concept_spend >= ${safeMinSpend} * 2  -- Concepts need 2x minimum spend
 ),
 
+-- Step 3: Top individual performers with dynamic sorting
 top_performers AS (
   SELECT
     ad_name,
@@ -110,13 +132,14 @@ top_performers AS (
     cpa,
     ctr,
     cvr,
-    -- Rank by selected metric
+    -- Rank by selected metric safely
     ROW_NUMBER() OVER (
       ORDER BY 
         CASE '${sort_by}'
           WHEN 'cpa' THEN cpa
           WHEN 'spend' THEN -total_spend
           WHEN 'conversions' THEN -total_conversions
+          ELSE cpa  -- Default fallback
         END
     ) as performance_rank
   FROM creative_data
@@ -124,6 +147,7 @@ top_performers AS (
   LIMIT 10
 ),
 
+-- Step 4: Performance distribution summary
 performance_distribution AS (
   SELECT
     performance_tier,
@@ -134,14 +158,14 @@ performance_distribution AS (
   GROUP BY performance_tier
 )
 
--- Output creative analysis summary
+-- Output 1: Creative Overview
 SELECT 
   'CREATIVE_OVERVIEW' as section,
   JSON_OBJECT(
-    'analysis_period', CONCAT((SELECT analysis_days FROM config), ' days'),
-    'countries_analyzed', (SELECT target_countries FROM config),
-    'min_spend_threshold', (SELECT min_spend_threshold FROM config),
-    'sort_criteria', (SELECT sort_metric FROM config),
+    'analysis_period', '${date_range} (${analysisDays} days)',
+    'countries_analyzed', ARRAY[${cleanCountries.map(c => `'${c.replace(/'/g, "\\'")}'`).join(', ')}],
+    'min_spend_threshold', ${safeMinSpend},
+    'sort_criteria', '${sort_by}',
     'total_creatives_analyzed', (SELECT COUNT(*) FROM creative_data),
     'total_concepts', (SELECT COUNT(*) FROM concept_summary),
     'performance_distribution', ARRAY_AGG(JSON_OBJECT(
@@ -155,6 +179,7 @@ FROM performance_distribution
 
 UNION ALL
 
+-- Output 2: Top Performing Concepts
 SELECT 
   'TOP_CONCEPTS' as section,
   JSON_OBJECT(
@@ -167,7 +192,7 @@ SELECT
       'avg_ctr', ROUND(avg_ctr, 2),
       'avg_cvr', ROUND(avg_cvr, 2),
       'performance_tier', performance_tier
-    ))
+    ) ORDER BY concept_cpa ASC)
   ) as summary_data
 FROM concept_summary
 ORDER BY concept_cpa ASC
@@ -175,11 +200,13 @@ LIMIT 8
 
 UNION ALL
 
+-- Output 3: Top Individual Ads
 SELECT 
   'TOP_INDIVIDUAL_ADS' as section,
   JSON_OBJECT(
+    'sorting_note', 'Sorted by ${sort_by}',
     'top_performers', ARRAY_AGG(JSON_OBJECT(
-      'ad_name', ad_name,
+      'ad_name', SUBSTR(ad_name, 1, 120),  -- Truncate long ad names
       'concept', creative_concept,
       'format', creative_format,
       'creator', creative_creator,
@@ -190,7 +217,7 @@ SELECT
       'ctr', ROUND(ctr, 2),
       'cvr', ROUND(cvr, 2),
       'rank', performance_rank
-    ))
+    ) ORDER BY performance_rank)
   ) as summary_data
 FROM top_performers
 
@@ -224,7 +251,7 @@ ORDER BY section;
 				return {
 					content: [{
 						type: "text",
-						text: `Creative Analysis Report (${date_range})\nCountries: ${countries.join(', ')}\nMin spend: $${min_spend}\nSorted by: ${sort_by}\n\nResults:\n${data}`
+						text: `Creative Analysis Report (${date_range})\nCountries: ${cleanCountries.join(', ')}\nMin spend: $${safeMinSpend}\nSorted by: ${sort_by}\n\nResults:\n${data}`
 					}]
 				};
 			} catch (error) {

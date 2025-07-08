@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { BLENDED_SUMMARY_TABLE, validateAndCleanInput } from "./sql-utils";
 
 /**
  * Register the flexible query tool - fallback for custom analysis not covered by templates
@@ -9,57 +10,136 @@ export function registerFlexibleQueryTool(server: McpServer) {
 		"flexible_query",
 		{
 			query: z.string().describe(`
-FLEXIBLE BIGQUERY ANALYSIS (Use as Fallback):
+FLEXIBLE BIGQUERY ANALYSIS (Use as Fallback Only):
 
-⚠️ IMPORTANT: Only use this tool when user requests don't fit these specialized templates:
+⚠️ CRITICAL SECURITY NOTICE:
+- This tool accepts raw SQL queries and should be used with extreme caution
+- Only use when specialized templates cannot handle the request
+- AI should validate queries before sending to prevent SQL injection
+
+⚠️ WHEN TO USE THIS TOOL (Fallback only):
+Only use when user requests don't fit these specialized templates:
 - weekly_performance_report: Business intelligence overviews, platform summaries
 - campaign_analysis: Specific campaign deep dives with comparisons  
 - creative_analysis: Meta creative performance and concept analysis
 - regional_comparison: Country/platform performance comparisons
 
-WHEN TO USE THIS TOOL:
-- Custom date ranges (e.g., "last 3 months", "Q4 2023")
-- Unique analysis requests (e.g., "hourly performance", "weekend vs weekday")
+VALID USE CASES:
+- Custom date ranges (e.g., "performance for Q4 2023")
+- Unique analysis requests (e.g., "hourly performance patterns")
 - Specific metrics combinations not in templates
-- Ad-hoc exploratory queries
+- Ad-hoc exploratory queries for data discovery
 
-CRITICAL REQUIREMENTS:
-- YOUR RESPONSE MUST ONLY BE THE BIGQUERY QUERY
-- YOU MUST ONLY EVER QUERY THIS TABLE: exemplary-terra-463404-m1.linktree_analytics.blended_summary
-- LIMIT RESULTS TO AVOID CONTEXT OVERLOAD (use LIMIT 20, aggregation, summarization)
-- Focus on actionable insights, not raw data dumps
+SECURITY REQUIREMENTS:
+- Queries must ONLY access: ${BLENDED_SUMMARY_TABLE}
+- No DDL operations (CREATE, DROP, ALTER, etc.)
+- No DML operations (INSERT, UPDATE, DELETE)
+- Use LIMIT clauses to prevent resource exhaustion
+- Avoid user-provided string literals in WHERE clauses
 
-TABLE SCHEMA:
-account_name: STRING, datasource: STRING, source: STRING, date: DATE, campaign: STRING, campaign_id: STRING, 
-adset_name: STRING, adset_id: STRING, ad_name: STRING, ad_id: STRING, ad_group_name: STRING, ad_group_id: STRING, 
-impressions: BIGNUMERIC, clicks: BIGNUMERIC, spend: BIGNUMERIC, conversions: BIGNUMERIC, preview_url: STRING, 
-country: STRING, campaign_objective: STRING, funnel_stage: STRING, targeting_type: STRING, product_focus: STRING, 
-platform: STRING, ctr_percent: BIGNUMERIC, cpc: BIGNUMERIC, conversion_rate_percent: BIGNUMERIC, cpa: BIGNUMERIC
+TABLE SCHEMA (${BLENDED_SUMMARY_TABLE}):
+account_name: STRING, datasource: STRING, source: STRING, date: DATE, 
+campaign: STRING, campaign_id: STRING, adset_name: STRING, adset_id: STRING, 
+ad_name: STRING, ad_id: STRING, ad_group_name: STRING, ad_group_id: STRING, 
+impressions: BIGNUMERIC, clicks: BIGNUMERIC, spend: BIGNUMERIC, 
+conversions: BIGNUMERIC, preview_url: STRING, country: STRING, 
+campaign_objective: STRING, funnel_stage: STRING, targeting_type: STRING, 
+product_focus: STRING, platform: STRING, ctr_percent: BIGNUMERIC, 
+cpc: BIGNUMERIC, conversion_rate_percent: BIGNUMERIC, cpa: BIGNUMERIC
 
-EXAMPLE CUSTOM QUERIES:
-- Time-of-day performance patterns
-- Specific campaign objective analysis
-- Custom attribution windows  
-- Seasonal trends (Christmas, Black Friday)
+EXAMPLE SAFE QUERIES:
+-- Time-based analysis
+SELECT DATE_TRUNC(date, WEEK) as week, platform, SUM(spend) as weekly_spend
+FROM ${BLENDED_SUMMARY_TABLE}
+WHERE date >= '2024-01-01' AND date <= '2024-03-31'
+GROUP BY week, platform ORDER BY week LIMIT 20;
+
+-- Platform comparison
+SELECT platform, AVG(cpa) as avg_cpa, SUM(conversions) as total_conversions
+FROM ${BLENDED_SUMMARY_TABLE} 
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
+GROUP BY platform ORDER BY avg_cpa LIMIT 10;
 
 CONTEXT:
 - Current date: ${new Date().toISOString().split('T')[0]}
-- User timezone: Melbourne
+- Timezone: Melbourne (AEDT/AEST)
+- Use date literals in 'YYYY-MM-DD' format for safety
 			`),
 		},
-		async ({ query }) => {
+		async ({ query }: { query: string }) => {
 			try {
-				// Hardcoded webhook URL - replace with your actual workflow webhook
-				const webhookUrl = "https://n8n.wibci.dev/webhook/40df3a90-da64-4939-8813-839f12a43cee"; // Example webhook for testing
+				// Validate and clean the query input
+				const cleanQuery = validateAndCleanInput(query) as string;
+				
+				// Basic security validation
+				const securityChecks = [
+					{
+						test: /\b(DROP|CREATE|ALTER|INSERT|UPDATE|DELETE|TRUNCATE)\b/i,
+						message: "DDL/DML operations are not allowed"
+					},
+					{
+						test: /\b(INFORMATION_SCHEMA|mysql|pg_|sys\.)\b/i,
+						message: "System schema access is not allowed"
+					},
+					{
+						test: /\b(LOAD|OUTFILE|DUMPFILE|EXPORT)\b/i,
+						message: "File operations are not allowed"
+					},
+					{
+						test: /\b(UNION.*SELECT.*FROM.*(?!`exemplary-terra-463404-m1\.linktree_analytics\.blended_summary`))\b/i,
+						message: "Queries can only access the authorized table"
+					},
+					{
+						test: new RegExp(`(?!${BLENDED_SUMMARY_TABLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})[\\w-]+\\.[\\w-]+\\.[\\w-]+`, 'i'),
+						message: "Only the specified analytics table is allowed"
+					}
+				];
+				
+				// Run security checks
+				for (const check of securityChecks) {
+					if (check.test.test(cleanQuery)) {
+						return {
+							content: [{
+								type: "text",
+								text: `Security Error: ${check.message}\n\nQuery rejected for security reasons. Please use the specialized template tools or modify your query to comply with security requirements.`
+							}]
+						};
+					}
+				}
+				
+				// Check for LIMIT clause to prevent resource exhaustion
+				if (!cleanQuery.match(/\bLIMIT\s+\d+\b/i) && !cleanQuery.match(/\bCOUNT\(\*\)\b/i)) {
+					return {
+						content: [{
+							type: "text",
+							text: `Query Validation Error: Queries must include a LIMIT clause to prevent resource exhaustion.\n\nExample: Add 'LIMIT 100' to your query, or use COUNT(*) for aggregations.`
+						}]
+					};
+				}
+				
+				// Validate table reference
+				if (!cleanQuery.includes(BLENDED_SUMMARY_TABLE) && !cleanQuery.toLowerCase().includes('exemplary-terra-463404-m1.linktree_analytics.blended_summary')) {
+					return {
+						content: [{
+							type: "text",
+							text: `Table Reference Error: Query must reference the authorized table: ${BLENDED_SUMMARY_TABLE}\n\nPlease update your query to use the correct table reference.`
+						}]
+					};
+				}
+				
+				const webhookUrl = "https://n8n.wibci.dev/webhook/40df3a90-da64-4939-8813-839f12a43cee";
 				
 				const response = await fetch(webhookUrl, {
 					method: "POST",
 					headers: {
 						"Content-Type": "application/json",
-						"User-Agent": "MCP-Performance-Tool/1.0",
+						"User-Agent": "MCP-Flexible-Query-Tool/1.0",
+						"X-Query-Length": cleanQuery.length.toString(),
 					},
 					body: JSON.stringify({
-						query: query
+						query: cleanQuery,
+						timestamp: new Date().toISOString(),
+						validation_passed: true
 					}),
 				});
 
@@ -67,7 +147,7 @@ CONTEXT:
 					return {
 						content: [{
 							type: "text",
-							text: `Error: Failed to execute performance workflow. Status: ${response.status} ${response.statusText}`
+							text: `Error: Failed to execute flexible query. Status: ${response.status} ${response.statusText}\n\nThis may indicate an issue with the query syntax or the analytics service. Please check your SQL syntax and try again.`
 						}]
 					};
 				}
@@ -77,14 +157,14 @@ CONTEXT:
 				return {
 					content: [{
 						type: "text",
-						text: `Performance workflow executed for query: "${query}"\n\nResult:\n${data}`
+						text: `Flexible Query Results\nQuery validation: Passed\nQuery length: ${cleanQuery.length} characters\n\n--- QUERY ---\n${cleanQuery.substring(0, 500)}${cleanQuery.length > 500 ? '...' : ''}\n\n--- RESULTS ---\n${data}`
 					}]
 				};
 			} catch (error) {
 				return {
 					content: [{
 						type: "text",
-						text: `Error calling performance webhook: ${error instanceof Error ? error.message : String(error)}`
+						text: `Error executing flexible query: ${error instanceof Error ? error.message : String(error)}\n\nPlease check your query syntax and ensure it follows the security guidelines. Consider using one of the specialized template tools instead.`
 					}]
 				};
 			}

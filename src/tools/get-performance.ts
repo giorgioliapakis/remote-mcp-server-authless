@@ -2,61 +2,45 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 /**
- * Register the get performance tool - posts a query to a webhook to run a workflow
+ * Register the flexible query tool - fallback for custom analysis not covered by templates
  */
-export function registerGetPerformanceTool(server: McpServer) {
+export function registerFlexibleQueryTool(server: McpServer) {
 	server.tool(
-		"get_performance",
+		"flexible_query",
 		{
 			query: z.string().describe(`
-Your response must ONLY be the bigquery query.
+FLEXIBLE BIGQUERY ANALYSIS (Use as Fallback):
 
-YOU MUST DO AS MUCH PROCESSING VIA BIGQUERY AS YOU CAN!
-We can't afford to return MASSIVE amounts of data, so let this be handled in your BigQuery queries.
+⚠️ IMPORTANT: Only use this tool when user requests don't fit these specialized templates:
+- weekly_performance_report: Business intelligence overviews, platform summaries
+- campaign_analysis: Specific campaign deep dives with comparisons  
+- creative_analysis: Meta creative performance and concept analysis
+- regional_comparison: Country/platform performance comparisons
 
-YOU MUST ONLY EVER QUERY THIS TABLE:
-exemplary-terra-463404-m1.linktree_analytics.blended_summary
+WHEN TO USE THIS TOOL:
+- Custom date ranges (e.g., "last 3 months", "Q4 2023")
+- Unique analysis requests (e.g., "hourly performance", "weekend vs weekday")
+- Specific metrics combinations not in templates
+- Ad-hoc exploratory queries
 
-Here is the schema for reference:
+CRITICAL REQUIREMENTS:
+- YOUR RESPONSE MUST ONLY BE THE BIGQUERY QUERY
+- YOU MUST ONLY EVER QUERY THIS TABLE: exemplary-terra-463404-m1.linktree_analytics.blended_summary
+- LIMIT RESULTS TO AVOID CONTEXT OVERLOAD (use LIMIT 20, aggregation, summarization)
+- Focus on actionable insights, not raw data dumps
 
-account_name: STRING
-datasource: STRING
-source: STRING
-date: DATE
-campaign: STRING
-campaign_id: STRING
-adset_name: STRING
-adset_id: STRING
-ad_name: STRING
-ad_id: STRING
-ad_group_name: STRING
-ad_group_id: STRING
-impressions: BIGNUMERIC
-clicks: BIGNUMERIC
-spend: BIGNUMERIC
-conversions: BIGNUMERIC
-preview_url: STRING
-country: STRING
-campaign_objective: STRING
-funnel_stage: STRING
-targeting_type: STRING
-product_focus: STRING
-platform: STRING
-ctr_percent: BIGNUMERIC
-cpc: BIGNUMERIC
-conversion_rate_percent: BIGNUMERIC
-cpa: BIGNUMERIC
+TABLE SCHEMA:
+account_name: STRING, datasource: STRING, source: STRING, date: DATE, campaign: STRING, campaign_id: STRING, 
+adset_name: STRING, adset_id: STRING, ad_name: STRING, ad_id: STRING, ad_group_name: STRING, ad_group_id: STRING, 
+impressions: BIGNUMERIC, clicks: BIGNUMERIC, spend: BIGNUMERIC, conversions: BIGNUMERIC, preview_url: STRING, 
+country: STRING, campaign_objective: STRING, funnel_stage: STRING, targeting_type: STRING, product_focus: STRING, 
+platform: STRING, ctr_percent: BIGNUMERIC, cpc: BIGNUMERIC, conversion_rate_percent: BIGNUMERIC, cpa: BIGNUMERIC
 
-When providing analyses on performance or data, do not provide surface level or obvious insights. Things like "run more AB tests" or "optimise your strategy" are not helpful. Go deeper, but ensure the insights are backed by data. Perform calculations for key metrics if it helps your narrative.
-
-Your response must ONLY be the bigquery query.
-
-
-EXAMPLE QUERY:
-SELECT date, SUM(impressions) as total_impressions, SUM(clicks) as total_clicks, SUM(spend) as total_spend 
-FROM exemplary-terra-463404-m1.linktree_analytics.blended_summary 
-WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) 
-GROUP BY date ORDER BY date DESC
+EXAMPLE CUSTOM QUERIES:
+- Time-of-day performance patterns
+- Specific campaign objective analysis
+- Custom attribution windows  
+- Seasonal trends (Christmas, Black Friday)
 
 CONTEXT:
 - Current date: ${new Date().toISOString().split('T')[0]}

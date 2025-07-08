@@ -50,7 +50,7 @@ CONTEXT:
 		async ({ query }) => {
 			try {
 				// Hardcoded webhook URL - replace with your actual workflow webhook
-				const webhookUrl = "https://n8n.wibci.dev/webhook-test/40df3a90-da64-4939-8813-839f12a43cee"; // Example webhook for testing
+				const webhookUrl = "https://n8n.wibci.dev/webhook/40df3a90-da64-4939-8813-839f12a43cee"; // Example webhook for testing
 				
 				const response = await fetch(webhookUrl, {
 					method: "POST",

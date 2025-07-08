@@ -197,7 +197,7 @@ FROM top_performers
 ORDER BY section;
 `;
 
-				const webhookUrl = "https://n8n.wibci.dev/webhook-test/40df3a90-da64-4939-8813-839f12a43cee";
+				const webhookUrl = "https://n8n.wibci.dev/webhook/40df3a90-da64-4939-8813-839f12a43cee";
 				
 				const response = await fetch(webhookUrl, {
 					method: "POST",

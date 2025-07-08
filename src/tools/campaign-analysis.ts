@@ -129,7 +129,36 @@ campaign_performance AS (
     ${getPerformanceRatingCase('cp.cpa_current')} as performance_rating
   FROM current_period_data cp
   LEFT JOIN comparison_period_data comp ON cp.campaign_id = comp.campaign_id
-)
+),
+
+-- Step 5: Pre-filter top performers to avoid LIMIT in UNION
+top_performers_filtered AS (
+  SELECT *
+  FROM campaign_performance
+  WHERE performance_rating IN ('EXCELLENT', 'GOOD')
+    AND spend_current >= 200
+  ORDER BY spend_current DESC
+  LIMIT 10
+)${include_creatives ? `,
+
+-- Step 6: Pre-filter creative data to avoid LIMIT in UNION  
+creative_filtered AS (
+  SELECT 
+    bd.ad_name,
+    bd.campaign_id,
+    SUM(bd.spend) as creative_spend,
+    SUM(bd.conversions) as creative_conversions,
+    ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} as creative_cpa
+  FROM campaign_matches cm
+  JOIN ${BLENDED_SUMMARY_TABLE} bd ON cm.campaign_id = bd.campaign_id
+  WHERE ${buildDateFilter(currentDays, 'bd')}
+    AND bd.platform = 'Meta'
+    AND bd.ad_name IS NOT NULL
+  GROUP BY bd.ad_name, bd.campaign_id
+  HAVING SUM(bd.spend) >= 100 AND SUM(bd.conversions) >= 2
+  ORDER BY ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} ASC
+  LIMIT 10
+)` : ''}
 
 -- Output 1: Executive Summary
 SELECT 
@@ -199,10 +228,7 @@ SELECT
       ) ORDER BY spend_current DESC
     )
   ) as summary_data
-FROM campaign_performance
-WHERE performance_rating IN ('EXCELLENT', 'GOOD')
-  AND spend_current >= 200
-LIMIT 10
+FROM top_performers_filtered
 
 ${include_creatives ? `
 UNION ALL
@@ -214,25 +240,18 @@ SELECT
     'note', 'Meta creative performance analysis included',
     'top_creatives', ARRAY_AGG(
       JSON_OBJECT(
-        'ad_name', SUBSTR(bd.ad_name, 1, 100),
+        'ad_name', SUBSTR(ad_name, 1, 100),
         'creative_concept', CASE 
-          WHEN bd.ad_name IS NOT NULL THEN SUBSTR(SPLIT(bd.ad_name, ' // ')[SAFE_OFFSET(0)], 1, 50)
+          WHEN ad_name IS NOT NULL THEN SUBSTR(SPLIT(ad_name, ' // ')[SAFE_OFFSET(0)], 1, 50)
           ELSE 'Unknown'
         END,
-        'spend', ROUND(SUM(bd.spend), 2),
-        'conversions', SUM(bd.conversions),
-        'cpa', ROUND(${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')}, 2)
-      ) ORDER BY ${safeCpaCalculation('SUM(bd.spend)', 'SUM(bd.conversions)')} ASC
+        'spend', ROUND(creative_spend, 2),
+        'conversions', creative_conversions,
+        'cpa', ROUND(creative_cpa, 2)
+      ) ORDER BY creative_cpa ASC
     )
   ) as summary_data
-FROM campaign_matches cm
-JOIN ${BLENDED_SUMMARY_TABLE} bd ON cm.campaign_id = bd.campaign_id
-WHERE ${buildDateFilter(currentDays, 'bd')}
-  AND bd.platform = 'Meta'
-  AND bd.ad_name IS NOT NULL
-GROUP BY bd.ad_name
-HAVING SUM(bd.spend) >= 100 AND SUM(bd.conversions) >= 2
-LIMIT 10
+FROM creative_filtered
 ` : ''}
 
 ORDER BY section;

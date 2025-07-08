@@ -156,6 +156,14 @@ performance_distribution AS (
     AVG(concept_cpa) as avg_tier_cpa
   FROM concept_summary
   GROUP BY performance_tier
+),
+
+-- Step 5: Pre-filter top concepts to avoid LIMIT in UNION
+top_concepts_filtered AS (
+  SELECT *
+  FROM concept_summary
+  ORDER BY concept_cpa ASC
+  LIMIT 8
 )
 
 -- Output 1: Creative Overview
@@ -194,9 +202,7 @@ SELECT
       'performance_tier', performance_tier
     ) ORDER BY concept_cpa ASC)
   ) as summary_data
-FROM concept_summary
-ORDER BY concept_cpa ASC
-LIMIT 8
+FROM top_concepts_filtered
 
 UNION ALL
 

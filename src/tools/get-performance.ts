@@ -8,11 +8,7 @@ export function registerGetPerformanceTool(server: McpServer) {
 	server.tool(
 		"get_performance",
 		{
-			title: "Performance Workflow Runner",
-			description: "Use this tool to send a query to a performance workflow",
-			inputSchema: {
-				query: z.string().describe("The query to send to the performance workflow"),
-			},
+			query: z.string().describe("The query to send to the performance workflow"),
 		},
 		async ({ query }) => {
 			try {

@@ -9,27 +9,58 @@ export function registerGetPerformanceTool(server: McpServer) {
 		"get_performance",
 		{
 			query: z.string().describe(`
-ANALYST ASSISTANT INSTRUCTIONS:
+Your response must ONLY be the bigquery query.
 
-Respond in lower case, casual style. Be conversational but professional. Don't waffle on. Be as concise as possible. 
-However if you're quoting any data retrieved from external sources, please don't alter the case formatting. 
-Acronyms or proper nouns should NOT be in lowercase. Ensure your messages are humanlike, but not too tryhard or over the top. Nothing corny.
+YOU MUST DO AS MUCH PROCESSING VIA BIGQUERY AS YOU CAN!
+We can't afford to return MASSIVE amounts of data, so let this be handled in your BigQuery queries.
 
-CRITICAL RULES:
-- If you don't have the answer, don't make it up!
-- When providing analyses on performance or data, do not provide surface level or obvious insights
-- Things like "run more AB tests" or "optimise your strategy" are not helpful
-- Go deeper, but ensure the insights are backed by data
-- Perform calculations for key metrics if it helps your narrative
-- You should ask a question(s) at the end of your analysis, or provide some potential next steps
+YOU MUST ONLY EVER QUERY THIS TABLE:
+exemplary-terra-463404-m1.linktree_analytics.blended_summary
 
-QUERY REQUIREMENTS:
-- The current date is: ${new Date().toISOString().split('T')[0]}
-- User is in Melbourne timezone
-- Focus on actionable insights backed by data
-- Look for patterns, anomalies, and opportunities for improvement
+Here is the schema for reference:
 
-Enter your performance analysis query here (e.g., "analyze The Imperfects Podcast performance trends", "compare Q4 metrics vs Q3", "identify top performing campaigns"):
+account_name: STRING
+datasource: STRING
+source: STRING
+date: DATE
+campaign: STRING
+campaign_id: STRING
+adset_name: STRING
+adset_id: STRING
+ad_name: STRING
+ad_id: STRING
+ad_group_name: STRING
+ad_group_id: STRING
+impressions: BIGNUMERIC
+clicks: BIGNUMERIC
+spend: BIGNUMERIC
+conversions: BIGNUMERIC
+preview_url: STRING
+country: STRING
+campaign_objective: STRING
+funnel_stage: STRING
+targeting_type: STRING
+product_focus: STRING
+platform: STRING
+ctr_percent: BIGNUMERIC
+cpc: BIGNUMERIC
+conversion_rate_percent: BIGNUMERIC
+cpa: BIGNUMERIC
+
+When providing analyses on performance or data, do not provide surface level or obvious insights. Things like "run more AB tests" or "optimise your strategy" are not helpful. Go deeper, but ensure the insights are backed by data. Perform calculations for key metrics if it helps your narrative.
+
+Your response must ONLY be the bigquery query.
+
+
+EXAMPLE QUERY:
+SELECT date, SUM(impressions) as total_impressions, SUM(clicks) as total_clicks, SUM(spend) as total_spend 
+FROM exemplary-terra-463404-m1.linktree_analytics.blended_summary 
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) 
+GROUP BY date ORDER BY date DESC
+
+CONTEXT:
+- Current date: ${new Date().toISOString().split('T')[0]}
+- User timezone: Melbourne
 			`),
 		},
 		async ({ query }) => {

@@ -21,9 +21,9 @@ export function registerCampaignAnalysisTool(server: McpServer) {
 		async ({ campaign_names, comparison_period, include_creatives }) => {
 			try {
 				const query = `
--- Campaign Deep Dive Analysis
--- Focused campaign performance with historical comparison
--- Results limited to essential insights to avoid context overload
+-- Campaign Deep Dive Analysis - READABLE FORMAT
+-- Executive summary + grouped insights to reduce cognitive load
+-- Only detailed breakdowns for problem areas
 
 WITH 
 config AS (
@@ -116,6 +116,49 @@ campaign_performance AS (
   LEFT JOIN comparison_period_data comp ON cp.campaign_id = comp.campaign_id
 ),
 
+executive_summary AS (
+  SELECT
+    COUNT(*) as total_campaigns,
+    SUM(spend_current) as total_spend,
+    SUM(conversions_current) as total_conversions,
+    SAFE_DIVIDE(SUM(spend_current), NULLIF(SUM(conversions_current), 0)) as blended_cpa,
+    -- Performance breakdown
+    COUNTIF(performance_rating = 'EXCELLENT') as excellent_count,
+    COUNTIF(performance_rating = 'GOOD') as good_count,
+    COUNTIF(performance_rating = 'ACCEPTABLE') as acceptable_count,
+    COUNTIF(performance_rating = 'NEEDS_ATTENTION') as needs_attention_count,
+    -- Platform breakdown
+    COUNTIF(platform = 'Meta') as meta_count,
+    COUNTIF(platform = 'Google') as google_count,
+    COUNTIF(platform = 'tiktok') as tiktok_count,
+    -- Country breakdown
+    COUNTIF(country = 'US') as us_count,
+    COUNTIF(country = 'UK') as uk_count,
+    COUNTIF(country = 'CA') as ca_count,
+    COUNTIF(country = 'AU') as au_count
+  FROM campaign_performance
+),
+
+platform_groups AS (
+  SELECT
+    platform,
+    performance_rating,
+    COUNT(*) as campaign_count,
+    ROUND(SUM(spend_current), 0) as group_spend,
+    ROUND(SUM(conversions_current), 0) as group_conversions,
+    ROUND(SAFE_DIVIDE(SUM(spend_current), NULLIF(SUM(conversions_current), 0)), 2) as group_cpa,
+    -- Best and worst performers in group
+    STRING_AGG(
+      CASE WHEN performance_rating = 'NEEDS_ATTENTION' 
+      THEN CONCAT(SUBSTR(campaign, 1, 50), '... ($', CAST(ROUND(spend_current) AS STRING), ', CPA: $', CAST(ROUND(cpa_current, 2) AS STRING), ')')
+      END, 
+      ' | ' 
+      LIMIT 3
+    ) as problem_campaigns
+  FROM campaign_performance
+  GROUP BY platform, performance_rating
+),
+
 creative_analysis AS (
   SELECT
     bd.campaign_id,
@@ -141,14 +184,62 @@ creative_analysis AS (
   LIMIT 10
 )
 
--- Output campaign analysis
+-- 1. EXECUTIVE SUMMARY
 SELECT 
-  'CAMPAIGN_OVERVIEW' as section,
+  'EXECUTIVE_SUMMARY' as section,
   JSON_OBJECT(
     'analysis_type', (SELECT comparison_type FROM config),
-    'campaigns_found', ARRAY_LENGTH((SELECT target_campaigns FROM config)),
     'search_terms', (SELECT target_campaigns FROM config),
-    'campaigns', ARRAY_AGG(JSON_OBJECT(
+    'totals', JSON_OBJECT(
+      'campaigns', (SELECT total_campaigns FROM executive_summary),
+      'spend', (SELECT ROUND(total_spend, 2) FROM executive_summary),
+      'conversions', (SELECT total_conversions FROM executive_summary),
+      'blended_cpa', (SELECT ROUND(blended_cpa, 2) FROM executive_summary)
+    ),
+    'performance_distribution', JSON_OBJECT(
+      'excellent', (SELECT excellent_count FROM executive_summary),
+      'good', (SELECT good_count FROM executive_summary), 
+      'acceptable', (SELECT acceptable_count FROM executive_summary),
+      'needs_attention', (SELECT needs_attention_count FROM executive_summary)
+    ),
+    'platform_distribution', JSON_OBJECT(
+      'meta', (SELECT meta_count FROM executive_summary),
+      'google', (SELECT google_count FROM executive_summary),
+      'tiktok', (SELECT tiktok_count FROM executive_summary)
+    ),
+    'country_distribution', JSON_OBJECT(
+      'us', (SELECT us_count FROM executive_summary),
+      'uk', (SELECT uk_count FROM executive_summary),
+      'ca', (SELECT ca_count FROM executive_summary),
+      'au', (SELECT au_count FROM executive_summary)
+    )
+  ) as summary_data
+
+UNION ALL
+
+-- 2. PLATFORM PERFORMANCE GROUPS
+SELECT 
+  'PLATFORM_PERFORMANCE' as section,
+  JSON_OBJECT(
+    'platform_groups', ARRAY_AGG(JSON_OBJECT(
+      'platform', platform,
+      'performance_tier', performance_rating,
+      'campaign_count', campaign_count,
+      'total_spend', group_spend,
+      'total_conversions', group_conversions,
+      'avg_cpa', group_cpa,
+      'sample_problem_campaigns', CASE WHEN performance_rating = 'NEEDS_ATTENTION' THEN problem_campaigns ELSE NULL END
+    ))
+  ) as summary_data
+FROM platform_groups
+
+UNION ALL
+
+-- 3. DETAILED CAMPAIGN DATA (Only for problem campaigns)
+SELECT 
+  'PROBLEM_CAMPAIGNS_DETAIL' as section,
+  JSON_OBJECT(
+    'campaigns_needing_attention', ARRAY_AGG(JSON_OBJECT(
       'campaign_name', campaign,
       'platform', platform,
       'country', country,
@@ -173,9 +264,33 @@ SELECT
     ))
   ) as summary_data
 FROM campaign_performance
+WHERE performance_rating = 'NEEDS_ATTENTION'
+ORDER BY spend_current DESC
+LIMIT 15
 
 UNION ALL
 
+-- 4. TOP PERFORMERS (Brief list)
+SELECT 
+  'TOP_PERFORMERS' as section,
+  JSON_OBJECT(
+    'excellent_campaigns', ARRAY_AGG(JSON_OBJECT(
+      'campaign_name', SUBSTR(campaign, 1, 80),
+      'platform', platform,
+      'country', country,
+      'cpa', ROUND(cpa_current, 2),
+      'spend', ROUND(spend_current, 2),
+      'conversions', conversions_current
+    ))
+  ) as summary_data
+FROM campaign_performance
+WHERE performance_rating = 'EXCELLENT'
+ORDER BY spend_current DESC
+LIMIT 10
+
+UNION ALL
+
+-- 5. CREATIVE ANALYSIS (if requested)
 SELECT 
   'CREATIVE_ANALYSIS' as section,
   JSON_OBJECT(
@@ -224,14 +339,14 @@ ORDER BY section;
 				return {
 					content: [{
 						type: "text",
-						text: `Campaign Analysis\nCampaigns: ${campaign_names.join(', ')}\nComparison: ${comparison_period}\nCreatives included: ${include_creatives}\n\nResults:\n${data}`
+						text: `Campaign Analysis (${comparison_period})\nSearch terms: ${campaign_names.join(', ')}\nCreative analysis: ${include_creatives ? 'Included' : 'Not included'}\n\nResults:\n${data}`
 					}]
 				};
 			} catch (error) {
 				return {
 					content: [{
 						type: "text",
-						text: `Error analyzing campaigns: ${error instanceof Error ? error.message : String(error)}`
+						text: `Error generating campaign analysis: ${error instanceof Error ? error.message : String(error)}`
 					}]
 				};
 			}

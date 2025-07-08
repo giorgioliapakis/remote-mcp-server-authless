@@ -1,5 +1,114 @@
 ---
-description:
+description: Project structure and organization guidelines for the remote MCP server
 globs:
-alwaysApply: false
+alwaysApply: true
 ---
+
+# Project Structure
+
+This document outlines the structure and organization of the remote MCP (Model Context Protocol) server project.
+
+## Directory Structure
+
+```
+remote-mcp-server-authless/
+├── src/
+│   ├── index.ts              # Main MCP agent class and Cloudflare Worker entry point
+│   └── tools/
+│       ├── index.ts          # Central tool registry and exports
+│       ├── add.ts            # Simple addition tool
+│       └── calculator.ts     # Multi-operation calculator tool
+├── package.json              # Dependencies and scripts
+├── tsconfig.json             # TypeScript configuration
+├── wrangler.jsonc            # Cloudflare Worker configuration
+└── biome.json               # Code formatting and linting rules
+```
+
+## File Organization Guidelines
+
+### Main Entry Point (`src/index.ts`)
+- Contains the main `MyMCP` class extending `McpAgent`
+- Handles Cloudflare Worker routing (`/sse`, `/mcp` endpoints)
+- Keeps tool registration logic minimal - delegates to tools module
+- Should remain focused on server setup and request routing
+
+### Tools Module (`src/tools/`)
+This directory follows a modular architecture where each tool is isolated:
+
+#### Tool File Structure
+- **Each tool gets its own file** (e.g., `add.ts`, `calculator.ts`)
+- **One tool per file** - maintains clear separation of concerns
+- **Consistent naming**: Use descriptive names that match the tool's purpose
+
+#### Individual Tool Files
+Each tool file should:
+- Export a single registration function (e.g., `registerAddTool`)
+- Import required dependencies (`McpServer`, `z` for schemas)
+- Include JSDoc comments describing the tool's purpose
+- Handle all tool-specific logic and error cases
+
+#### Tools Index (`src/tools/index.ts`)
+- **Central registry**: Re-exports all individual tool registration functions
+- **Convenience function**: Provides `registerAllTools()` for bulk registration
+- **Single source of truth**: Import tools from this file, not individual tool files
+
+### Adding New Tools
+
+To add a new tool:
+
+1. **Create tool file**: `src/tools/your-tool.ts`
+   ```typescript
+   import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+   import { z } from "zod";
+
+   export function registerYourTool(server: McpServer) {
+     server.tool("your-tool", schema, handler);
+   }
+   ```
+
+2. **Update index**: Add exports to `src/tools/index.ts`
+   ```typescript
+   export { registerYourTool } from "./your-tool";
+   // Add to registerAllTools() function
+   ```
+
+3. **Tool registration**: Tools are automatically registered via `registerAllTools()`
+
+## Architecture Principles
+
+### Modularity
+- Each tool is completely isolated in its own file
+- No cross-dependencies between tools
+- Easy to add, remove, or modify individual tools
+
+### Scalability
+- New tools require minimal changes to existing code
+- Clear patterns for tool development
+- Centralized registration system
+
+### Maintainability
+- Single responsibility principle for each file
+- Consistent structure across all tools
+- Clear import/export patterns
+
+### Type Safety
+- All tools use Zod schemas for input validation
+- TypeScript types throughout the codebase
+- Proper error handling and type checking
+
+## Usage Patterns
+
+### Registering All Tools
+```typescript
+import { registerAllTools } from "./tools";
+registerAllTools(server);
+```
+
+### Registering Specific Tools
+```typescript
+import { registerAddTool, registerCalculatorTool } from "./tools";
+registerAddTool(server);
+registerCalculatorTool(server);
+```
+
+This structure ensures the codebase remains organized, scalable, and easy to maintain as the number of tools grows.

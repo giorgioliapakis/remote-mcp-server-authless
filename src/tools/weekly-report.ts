@@ -109,6 +109,14 @@ regional_summary AS (
   GROUP BY country
 ),
 
+-- Step 3b: Add efficiency ranking to regional data
+regional_with_rank AS (
+  SELECT 
+    *,
+    RANK() OVER (ORDER BY country_cpa ASC) as efficiency_rank
+  FROM regional_summary
+),
+
 -- Step 4: Performance issues (over target by 20%+)
 performance_issues AS (
   SELECT
@@ -198,10 +206,10 @@ SELECT
       'conversions', country_conversions,
       'cpa', ROUND(country_cpa, 2),
       'active_platforms', active_platforms,
-      'efficiency_rank', RANK() OVER (ORDER BY country_cpa ASC)
+      'efficiency_rank', efficiency_rank
     ) ORDER BY country_spend DESC)
   ) as summary_data
-FROM regional_summary
+FROM regional_with_rank
 
 UNION ALL
 

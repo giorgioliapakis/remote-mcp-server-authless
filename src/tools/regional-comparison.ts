@@ -145,6 +145,14 @@ country_summary AS (
   HAVING total_spend >= 1000  -- Country-level minimum
 ),
 
+-- Step 4b: Add efficiency ranking to country data
+country_with_rank AS (
+  SELECT 
+    *,
+    ROW_NUMBER() OVER (ORDER BY blended_cpa ASC) as efficiency_rank
+  FROM country_summary
+),
+
 -- Step 5: Platform-country matrix (conditional)
 platform_country_summary AS (
   SELECT
@@ -180,10 +188,10 @@ SELECT
       'avg_cpa_change_pct', ROUND(COALESCE(avg_cpa_change, 0), 1),
       'strong_segments', strong_segments,
       'weak_segments', weak_segments,
-      'efficiency_rank', ROW_NUMBER() OVER (ORDER BY blended_cpa ASC)
+      'efficiency_rank', efficiency_rank
     ) ORDER BY total_spend DESC)
   ) as summary_data
-FROM country_summary
+FROM country_with_rank
 WHERE '${comparison_type}' = 'country'
 
 UNION ALL
@@ -214,11 +222,11 @@ SELECT
   'REGIONAL_INSIGHTS' as section,
   JSON_OBJECT(
     'key_findings', JSON_OBJECT(
-      'best_performing_country', (SELECT country FROM country_summary ORDER BY blended_cpa ASC LIMIT 1),
-      'highest_spend_country', (SELECT country FROM country_summary ORDER BY total_spend DESC LIMIT 1),
+      'best_performing_country', (SELECT country FROM country_with_rank ORDER BY blended_cpa ASC LIMIT 1),
+      'highest_spend_country', (SELECT country FROM country_with_rank ORDER BY total_spend DESC LIMIT 1),
       'most_improved', CASE 
         WHEN ${include_trends} THEN
-          (SELECT country FROM country_summary WHERE avg_cpa_change IS NOT NULL ORDER BY avg_cpa_change ASC LIMIT 1)
+          (SELECT country FROM country_with_rank WHERE avg_cpa_change IS NOT NULL ORDER BY avg_cpa_change ASC LIMIT 1)
         ELSE 'Trend analysis disabled'
       END,
       'needs_attention', ARRAY_AGG(
@@ -227,7 +235,7 @@ SELECT
       'total_countries_analyzed', COUNT(*)
     )
   ) as summary_data
-FROM country_summary
+FROM country_with_rank
 
 ORDER BY section;
 `;

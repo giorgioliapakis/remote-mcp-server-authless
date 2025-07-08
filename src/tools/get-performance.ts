@@ -9,7 +9,7 @@ export function registerGetPerformanceTool(server: McpServer) {
 		"get_performance",
 		{
 			title: "Performance Workflow Runner",
-			description: "Execute performance analysis workflows by sending queries to a webhook endpoint",
+			description: "Use this tool to send a query to a performance workflow",
 			inputSchema: {
 				query: z.string().describe("The query to send to the performance workflow"),
 			},

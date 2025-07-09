@@ -117,9 +117,9 @@ base_impression_data AS (
     -- Trend analysis
     AVG(wow_impression_share_change) as avg_wow_change,
     
-    -- Market position
-    MODE(market_position) as primary_market_position,
-    MODE(performance_diagnosis) as primary_diagnosis
+    -- Market position (get most common value per campaign)
+    APPROX_TOP_COUNT(market_position, 1)[OFFSET(0)].value as primary_market_position,
+    APPROX_TOP_COUNT(performance_diagnosis, 1)[OFFSET(0)].value as primary_diagnosis
     
   FROM ${IMPRESSION_SHARE_TABLE}
   WHERE 

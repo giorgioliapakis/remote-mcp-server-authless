@@ -132,4 +132,38 @@ export function validateAndCleanInput(input: any): any {
 		return input.slice(0, 20).map(item => validateAndCleanInput(item)); // Limit array size
 	}
 	return input;
+}
+
+/**
+ * Validate and clean SQL query input - allows longer queries for complex analytics
+ */
+export function validateAndCleanSqlQuery(query: string): string {
+	if (typeof query !== 'string') {
+		throw new Error('Query must be a string');
+	}
+	
+	// Trim whitespace
+	const cleaned = query.trim();
+	
+	// Reasonable length limit for SQL queries (10KB)
+	if (cleaned.length > 10000) {
+		throw new Error('Query too long - maximum 10,000 characters allowed');
+	}
+	
+	// Basic SQL injection patterns (beyond what we check in security validation)
+	const dangerousPatterns = [
+		/;\s*(DROP|CREATE|ALTER|INSERT|UPDATE|DELETE|TRUNCATE)/i,
+		/--[^\r\n]*$/m, // SQL comments that might hide malicious code
+		/\/\*[\s\S]*?\*\//g, // Multi-line SQL comments
+		/\bxp_cmdshell\b/i,
+		/\bsp_executesql\b/i
+	];
+	
+	for (const pattern of dangerousPatterns) {
+		if (pattern.test(cleaned)) {
+			throw new Error('Query contains potentially dangerous SQL patterns');
+		}
+	}
+	
+	return cleaned;
 } 

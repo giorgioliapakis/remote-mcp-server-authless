@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BLENDED_SUMMARY_TABLE, validateAndCleanInput } from "./sql-utils";
+import { BLENDED_SUMMARY_TABLE, validateAndCleanSqlQuery } from "./sql-utils";
 
 /**
  * Register the flexible query tool - fallback for custom analysis not covered by templates
@@ -69,7 +69,17 @@ CONTEXT:
 		async ({ query }: { query: string }) => {
 			try {
 				// Validate and clean the query input
-				const cleanQuery = validateAndCleanInput(query) as string;
+				let cleanQuery: string;
+				try {
+					cleanQuery = validateAndCleanSqlQuery(query);
+				} catch (validationError) {
+					return {
+						content: [{
+							type: "text",
+							text: `Input Validation Error: ${validationError instanceof Error ? validationError.message : String(validationError)}\n\nPlease ensure your query follows proper SQL syntax and security guidelines.`
+						}]
+					};
+				}
 				
 				// Basic security validation
 				const securityChecks = [
@@ -84,14 +94,6 @@ CONTEXT:
 					{
 						test: /\b(LOAD|OUTFILE|DUMPFILE|EXPORT)\b/i,
 						message: "File operations are not allowed"
-					},
-					{
-						test: /\b(UNION.*SELECT.*FROM.*(?!`exemplary-terra-463404-m1\.linktree_analytics\.blended_summary`))\b/i,
-						message: "Queries can only access the authorized table"
-					},
-					{
-						test: new RegExp(`(?!${BLENDED_SUMMARY_TABLE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})[\\w-]+\\.[\\w-]+\\.[\\w-]+`, 'i'),
-						message: "Only the specified analytics table is allowed"
 					}
 				];
 				
@@ -107,8 +109,31 @@ CONTEXT:
 					}
 				}
 				
-				// Check for LIMIT clause to prevent resource exhaustion
-				if (!cleanQuery.match(/\bLIMIT\s+\d+\b/i) && !cleanQuery.match(/\bCOUNT\(\*\)\b/i)) {
+				// Validate table reference - check that query only references authorized table
+				const authorizedTable1 = 'exemplary-terra-463404-m1.linktree_analytics.blended_summary';
+				const authorizedTable2 = '`exemplary-terra-463404-m1.linktree_analytics.blended_summary`';
+				
+				// Extract all table references (looking for database.schema.table patterns)
+				const tableReferences = cleanQuery.match(/(?:`[^`]+`\.`[^`]+`\.`[^`]+`|[\w-]+\.[\w-]+\.[\w-]+)/gi) || [];
+				const unauthorizedTables = tableReferences.filter(table => 
+					!table.includes('exemplary-terra-463404-m1.linktree_analytics.blended_summary')
+				);
+				
+				if (unauthorizedTables.length > 0) {
+					return {
+						content: [{
+							type: "text",
+							text: `Security Error: Only the specified analytics table is allowed\n\nUnauthorized tables detected: ${unauthorizedTables.join(', ')}\nQuery rejected for security reasons. Please use the specialized template tools or modify your query to comply with security requirements.`
+						}]
+					};
+				}
+				
+				// Check for LIMIT clause to prevent resource exhaustion - improved regex
+				const hasLimit = /\bLIMIT\s+\d+\b/i.test(cleanQuery);
+				const hasCount = /\bCOUNT\s*\(\s*[*\w]+\s*\)/i.test(cleanQuery);
+				const hasAggregation = /\b(SUM|AVG|MAX|MIN|COUNT)\s*\(/i.test(cleanQuery);
+				
+				if (!hasLimit && !hasCount && !hasAggregation) {
 					return {
 						content: [{
 							type: "text",
@@ -117,8 +142,8 @@ CONTEXT:
 					};
 				}
 				
-				// Validate table reference
-				if (!cleanQuery.includes(BLENDED_SUMMARY_TABLE) && !cleanQuery.toLowerCase().includes('exemplary-terra-463404-m1.linktree_analytics.blended_summary')) {
+				// Validate table reference exists in query
+				if (!cleanQuery.includes(authorizedTable1) && !cleanQuery.includes(authorizedTable2)) {
 					return {
 						content: [{
 							type: "text",

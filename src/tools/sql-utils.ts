@@ -122,6 +122,40 @@ export function safeCvrCalculation(conversionsColumn: string = 'conversions', cl
 }
 
 /**
+ * Create safe platform pivot aggregation (avoids aggregations of aggregations error)
+ * @param metric - The metric to aggregate (e.g., 'spend', 'conversions')
+ * @param platforms - Array of platform names to pivot
+ * @param precision - Number of decimal places for rounding (default: 2)
+ */
+export function createPlatformPivot(metric: string, platforms: string[], precision: number = 2): string {
+	const pivotColumns = platforms.map(platform => {
+		const safeColumnName = platform.toLowerCase().replace(/[^a-z0-9]/g, '_');
+		if (precision === 0) {
+			return `ROUND(SUM(CASE WHEN platform = '${platform}' THEN ${metric} END), 0) as ${safeColumnName}_${metric}`;
+		} else {
+			return `ROUND(SUM(CASE WHEN platform = '${platform}' THEN ${metric} END), ${precision}) as ${safeColumnName}_${metric}`;
+		}
+	});
+	
+	return pivotColumns.join(',\n  ');
+}
+
+/**
+ * Create safe platform CPA pivot (handles division safely)
+ */
+export function createPlatformCpaPivot(platforms: string[]): string {
+	const cpaPivots = platforms.map(platform => {
+		const safeColumnName = platform.toLowerCase().replace(/[^a-z0-9]/g, '_');
+		return `ROUND(SAFE_DIVIDE(
+      SUM(CASE WHEN platform = '${platform}' THEN spend END), 
+      SUM(CASE WHEN platform = '${platform}' THEN conversions END)
+    ), 2) as ${safeColumnName}_cpa`;
+	});
+	
+	return cpaPivots.join(',\n  ');
+}
+
+/**
  * Validate and clean user input
  */
 export function validateAndCleanInput(input: any): any {

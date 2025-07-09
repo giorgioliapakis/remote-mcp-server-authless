@@ -1,9 +1,3 @@
----
-description: Project structure and organization guidelines for the remote MCP server
-globs:
-alwaysApply: true
----
-
 # Project Structure
 
 This document outlines the structure and organization of the remote MCP (Model Context Protocol) server project.
@@ -16,8 +10,14 @@ remote-mcp-server-authless/
 │   ├── index.ts              # Main MCP agent class and Cloudflare Worker entry point
 │   └── tools/
 │       ├── index.ts          # Central tool registry and exports
-│       ├── add.ts            # Simple addition tool
-│       └── calculator.ts     # Multi-operation calculator tool
+│       ├── sql-utils.ts      # Shared SQL utilities and BigQuery helpers
+│       ├── add.ts            # Simple addition tool (demo)
+│       ├── calculator.ts     # Multi-operation calculator tool (demo)
+│       ├── campaign-analysis.ts    # Campaign performance deep-dive analysis
+│       ├── creative-analysis.ts    # Meta creative performance and concept analysis
+│       ├── get-performance.ts      # Flexible SQL query tool (fallback)
+│       ├── regional-comparison.ts  # Country/platform performance comparisons
+│       └── weekly-report.ts        # Business intelligence overview reports
 ├── package.json              # Dependencies and scripts
 ├── tsconfig.json             # TypeScript configuration
 ├── wrangler.jsonc            # Cloudflare Worker configuration
@@ -36,25 +36,69 @@ remote-mcp-server-authless/
 This directory follows a modular architecture where each tool is isolated:
 
 #### Tool File Structure
-- **Each tool gets its own file** (e.g., `add.ts`, `calculator.ts`)
+- **Each tool gets its own file** (e.g., `campaign-analysis.ts`, `weekly-report.ts`)
 - **One tool per file** - maintains clear separation of concerns
 - **Consistent naming**: Use descriptive names that match the tool's purpose
+- **Domain grouping**: Analytics tools share common patterns and utilities
 
 #### Individual Tool Files
 Each tool file should:
-- Export a single registration function (e.g., `registerAddTool`)
+- Export a single registration function (e.g., `registerCampaignAnalysisTool`)
 - Import required dependencies (`McpServer`, `z` for schemas)
+- Import shared utilities from `sql-utils.ts` for BigQuery operations
 - Include JSDoc comments describing the tool's purpose
 - Handle all tool-specific logic and error cases
+- Use safe SQL parameter handling from utilities
+
+#### Shared Utilities (`src/tools/sql-utils.ts`)
+- **SQL safety functions**: Parameter escaping, LIKE clause building, date filtering
+- **BigQuery helpers**: Standard calculations (CPA, CTR, CVR), performance ratings
+- **Security utilities**: Input validation specifically for SQL queries
+- **Common patterns**: Reusable SQL generation functions
+- **Constants**: Authorized table references and shared configurations
 
 #### Tools Index (`src/tools/index.ts`)
 - **Central registry**: Re-exports all individual tool registration functions
 - **Convenience function**: Provides `registerAllTools()` for bulk registration
 - **Single source of truth**: Import tools from this file, not individual tool files
 
+### Current Tool Categories
+
+#### Demo Tools
+- `add.ts` - Simple addition for testing
+- `calculator.ts` - Multi-operation calculator
+
+#### Analytics Tools
+- `weekly-report.ts` - Business intelligence overviews and platform summaries
+- `campaign-analysis.ts` - Specific campaign deep dives with performance comparisons
+- `creative-analysis.ts` - Meta creative performance and concept analysis
+- `regional-comparison.ts` - Country and platform performance breakdowns
+- `get-performance.ts` - Flexible BigQuery tool for custom analysis (fallback)
+
 ### Adding New Tools
 
-To add a new tool:
+#### For Analytics Tools:
+
+1. **Create tool file**: `src/tools/your-analytics-tool.ts`
+   ```typescript
+   import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+   import { z } from "zod";
+   import { 
+     BLENDED_SUMMARY_TABLE, 
+     buildDateFilter, 
+     createCampaignMatchConditions 
+   } from "./sql-utils";
+
+   export function registerYourAnalyticsTool(server: McpServer) {
+     server.tool("your-analytics-tool", schema, handler);
+   }
+   ```
+
+2. **Use shared utilities**: Import SQL helpers from `sql-utils.ts` for safe query building
+3. **Follow security patterns**: Use parameterized queries and avoid string interpolation
+4. **Update index**: Add exports to `src/tools/index.ts`
+
+#### For General Tools:
 
 1. **Create tool file**: `src/tools/your-tool.ts`
    ```typescript
@@ -67,34 +111,39 @@ To add a new tool:
    ```
 
 2. **Update index**: Add exports to `src/tools/index.ts`
-   ```typescript
-   export { registerYourTool } from "./your-tool";
-   // Add to registerAllTools() function
-   ```
-
 3. **Tool registration**: Tools are automatically registered via `registerAllTools()`
 
 ## Architecture Principles
 
 ### Modularity
 - Each tool is completely isolated in its own file
+- Shared functionality extracted to utilities module
 - No cross-dependencies between tools
 - Easy to add, remove, or modify individual tools
+
+### Security First
+- All SQL queries use parameterized approaches
+- Shared validation functions prevent injection attacks
+- Input sanitization at the utility level
+- Principle of least privilege for data access
 
 ### Scalability
 - New tools require minimal changes to existing code
 - Clear patterns for tool development
 - Centralized registration system
+- Shared utilities prevent code duplication
 
 ### Maintainability
 - Single responsibility principle for each file
 - Consistent structure across all tools
 - Clear import/export patterns
+- Domain-specific utility functions
 
 ### Type Safety
 - All tools use Zod schemas for input validation
 - TypeScript types throughout the codebase
 - Proper error handling and type checking
+- Shared type definitions in utilities
 
 ## Usage Patterns
 
@@ -106,9 +155,46 @@ registerAllTools(server);
 
 ### Registering Specific Tools
 ```typescript
-import { registerAddTool, registerCalculatorTool } from "./tools";
-registerAddTool(server);
-registerCalculatorTool(server);
+import { registerWeeklyReportTool, registerCampaignAnalysisTool } from "./tools";
+registerWeeklyReportTool(server);
+registerCampaignAnalysisTool(server);
 ```
 
-This structure ensures the codebase remains organized, scalable, and easy to maintain as the number of tools grows.
+### Using SQL Utilities
+```typescript
+import { 
+  BLENDED_SUMMARY_TABLE,
+  buildDateFilter,
+  createCampaignMatchConditions,
+  safeCpaCalculation 
+} from "./sql-utils";
+
+// Safe date filtering
+const dateCondition = buildDateFilter(7); // Last 7 days
+
+// Safe campaign matching
+const campaignCondition = createCampaignMatchConditions(['Growth', 'Earn']);
+
+// Safe CPA calculation
+const cpaColumn = safeCpaCalculation();
+```
+
+## Security Guidelines
+
+### SQL Query Construction
+- **NEVER** use string interpolation for user input
+- **ALWAYS** use utility functions from `sql-utils.ts`
+- **VALIDATE** all inputs before query construction
+- **LIMIT** query results to prevent resource exhaustion
+
+### Input Validation
+- Use `validateAndCleanSqlQuery()` for SQL queries
+- Use `validateAndCleanInput()` for general parameters
+- Implement schema validation with Zod
+- Handle validation errors gracefully
+
+This structure ensures the codebase remains organized, secure, and easy to maintain as the number of tools grows, with special attention to the analytics domain requirements.
+description:
+globs:
+alwaysApply: false
+---

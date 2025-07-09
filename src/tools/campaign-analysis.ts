@@ -21,7 +21,7 @@ export function registerCampaignAnalysisTool(server: McpServer) {
 		"campaign_analysis",
 		{
 			campaign_names: z.array(z.string()).describe(
-				"Campaign names to analyze. Use partial matches (e.g., ['Podcast', 'AU Launch']). Can infer from user mentions like 'The Imperfects campaign' or 'podcast campaigns'"
+				"Campaign names to analyze. Use partial matches (e.g., ['Podcast', 'AU Launch']). Can infer from user mentions like 'Grow Campaign' or 'Earn campaigns'"
 			),
 			comparison_period: z.enum(["week_over_week", "month_over_month"]).default("week_over_week").describe(
 				"Comparison timeframe. Use 'week_over_week' for recent changes, 'month_over_month' for longer trends"

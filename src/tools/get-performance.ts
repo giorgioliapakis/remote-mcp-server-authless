@@ -37,6 +37,16 @@ SECURITY REQUIREMENTS:
 - Use LIMIT clauses to prevent resource exhaustion
 - Avoid user-provided string literals in WHERE clauses
 
+⚠️ COMMON BIGQUERY ERRORS TO AVOID:
+- Aggregations of aggregations: DON'T use MAX(SUM(...)) or similar nested aggregates
+- Window functions in aggregates: DON'T use SUM(RANK() OVER(...))
+- LIMIT in UNION: DON'T put LIMIT on individual SELECT statements within UNION ALL
+
+✅ SAFE PATTERNS:
+- Conditional aggregation: SUM(CASE WHEN platform = 'Google' THEN spend END)
+- Safe division: SAFE_DIVIDE(SUM(spend), SUM(conversions))
+- Platform pivots: Use conditional SUM instead of MAX(CASE...SUM)
+
 TABLE SCHEMA (${BLENDED_SUMMARY_TABLE}):
 account_name: STRING, datasource: STRING, source: STRING, date: DATE, 
 campaign: STRING, campaign_id: STRING, adset_name: STRING, adset_id: STRING, 

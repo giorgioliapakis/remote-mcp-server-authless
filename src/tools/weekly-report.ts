@@ -9,6 +9,14 @@ import {
 	safeCpaCalculation,
 	validateAndCleanInput
 } from "./sql-utils";
+import { 
+	WEEKLY_REPORT, 
+	PLATFORM_TARGETS, 
+	WEBHOOK_CONFIG, 
+	DEFAULT_COUNTRIES, 
+	DEFAULT_PLATFORMS,
+	UTILITIES 
+} from "../settings";
 
 /**
  * Register the weekly performance report tool - generates comprehensive business intelligence
@@ -20,10 +28,10 @@ export function registerWeeklyReportTool(server: McpServer) {
 			date_range: z.enum(["7d", "14d", "30d"]).default("7d").describe(
 				"Time period for analysis. Use '7d' for weekly reports, '14d' for bi-weekly, '30d' for monthly. Default: 7d"
 			),
-			platforms: z.array(z.enum(["Meta", "Google", "Bing"])).default(["Meta", "Google", "Bing"]).describe(
+			platforms: z.array(z.enum(["Meta", "Google", "Bing"])).default(DEFAULT_PLATFORMS).describe(
 				"Platforms to include in analysis. Default includes all platforms. Common: ['Meta', 'Google'] for paid social + search"
 			),
-			countries: z.array(z.string()).default(["US", "AU", "UK"]).describe(
+			countries: z.array(z.string()).default(DEFAULT_COUNTRIES).describe(
 				"Countries to analyze. Default: ['US', 'AU', 'UK']. Use ['US'] for US-only analysis, ['AU'] for Australia-only, etc."
 			),
 		},
@@ -43,12 +51,8 @@ export function registerWeeklyReportTool(server: McpServer) {
 				const countryFilter = createInClause(cleanCountries, 'country');
 				const dateFilter = buildDateFilter(analysisDays);
 				
-				// Platform target CPAs (hardcoded business rules)
-				const platformTargets = {
-					Meta: 50.0,
-					Google: 25.0,
-					Bing: 25.0
-				};
+				// Platform target CPAs from settings
+				const platformTargets = PLATFORM_TARGETS;
 
 				const query = `
 -- Weekly Business Intelligence Report - FIXED VERSION
@@ -74,8 +78,8 @@ base_data AS (
     AND spend > 0
   GROUP BY platform, country, campaign_objective
   HAVING 
-    total_spend >= 500
-    AND total_conversions >= 5
+    total_spend >= ${WEEKLY_REPORT.MIN_SPEND_THRESHOLD}
+    AND total_conversions >= ${WEEKLY_REPORT.MIN_CONVERSIONS_THRESHOLD}
 ),
 
 -- Step 2: Platform summary with target comparisons
@@ -247,13 +251,11 @@ FROM opportunities
 ORDER BY section;
 `;
 
-				const webhookUrl = "https://n8n.wibci.dev/webhook/40df3a90-da64-4939-8813-839f12a43cee";
-				
-				const response = await fetch(webhookUrl, {
+				const response = await fetch(WEBHOOK_CONFIG.URL, {
 					method: "POST",
 					headers: {
-						"Content-Type": "application/json",
-						"User-Agent": "MCP-Weekly-Report-Tool/1.0",
+						"Content-Type": WEBHOOK_CONFIG.HEADERS['Content-Type'],
+						"User-Agent": `${WEBHOOK_CONFIG.HEADERS['User-Agent-Prefix']}-Weekly-Report/1.0`,
 					},
 					body: JSON.stringify({
 						query: query

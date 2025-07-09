@@ -2,6 +2,8 @@
  * SQL Utilities for BigQuery - Safe parameter handling and common patterns
  */
 
+import { BIGQUERY_CONFIG, PERFORMANCE_THRESHOLDS, DATE_RANGES, COMPARISON_PERIODS, FLEXIBLE_QUERY } from "../settings";
+
 /**
  * Safely escape a string value for SQL LIKE queries
  */
@@ -45,26 +47,14 @@ export function createInClause(values: string[], columnName: string): string {
  * Get numeric days value from date range enum
  */
 export function getDaysFromRange(dateRange: '7d' | '14d' | '30d'): number {
-	switch (dateRange) {
-		case '7d': return 7;
-		case '14d': return 14;
-		case '30d': return 30;
-		default: return 7;
-	}
+	return DATE_RANGES[dateRange] || 7;
 }
 
 /**
  * Get comparison period days for trend analysis
  */
 export function getComparisonDays(comparisonType: 'week_over_week' | 'month_over_month'): { current: number; comparison: number } {
-	switch (comparisonType) {
-		case 'week_over_week':
-			return { current: 7, comparison: 14 };
-		case 'month_over_month':
-			return { current: 30, comparison: 60 };
-		default:
-			return { current: 7, comparison: 14 };
-	}
+	return COMPARISON_PERIODS[comparisonType] || COMPARISON_PERIODS.week_over_week;
 }
 
 /**
@@ -86,16 +76,16 @@ export function buildComparisonDateFilter(currentDays: number, totalDays: number
 /**
  * Standard BigQuery table reference
  */
-export const BLENDED_SUMMARY_TABLE = '`exemplary-terra-463404-m1.linktree_analytics.blended_summary`';
+export const BLENDED_SUMMARY_TABLE = BIGQUERY_CONFIG.BLENDED_SUMMARY_TABLE;
 
 /**
  * Common performance rating classification
  */
 export function getPerformanceRatingCase(cpaColumn: string = 'cpa'): string {
 	return `CASE
-		WHEN ${cpaColumn} <= 25 THEN 'EXCELLENT'
-		WHEN ${cpaColumn} <= 40 THEN 'GOOD'
-		WHEN ${cpaColumn} <= 60 THEN 'ACCEPTABLE'
+		WHEN ${cpaColumn} <= ${PERFORMANCE_THRESHOLDS.EXCELLENT} THEN 'EXCELLENT'
+		WHEN ${cpaColumn} <= ${PERFORMANCE_THRESHOLDS.GOOD} THEN 'GOOD'
+		WHEN ${cpaColumn} <= ${PERFORMANCE_THRESHOLDS.ACCEPTABLE} THEN 'ACCEPTABLE'
 		ELSE 'NEEDS_ATTENTION'
 	END`;
 }
@@ -179,19 +169,13 @@ export function validateAndCleanSqlQuery(query: string): string {
 	// Trim whitespace
 	const cleaned = query.trim();
 	
-	// Reasonable length limit for SQL queries (10KB)
-	if (cleaned.length > 10000) {
-		throw new Error('Query too long - maximum 10,000 characters allowed');
+	// Reasonable length limit for SQL queries from settings
+	if (cleaned.length > FLEXIBLE_QUERY.MAX_QUERY_LENGTH) {
+		throw new Error(`Query too long - maximum ${FLEXIBLE_QUERY.MAX_QUERY_LENGTH} characters allowed`);
 	}
 	
-	// Basic SQL injection patterns (beyond what we check in security validation)
-	const dangerousPatterns = [
-		/;\s*(DROP|CREATE|ALTER|INSERT|UPDATE|DELETE|TRUNCATE)/i,
-		/--[^\r\n]*$/m, // SQL comments that might hide malicious code
-		/\/\*[\s\S]*?\*\//g, // Multi-line SQL comments
-		/\bxp_cmdshell\b/i,
-		/\bsp_executesql\b/i
-	];
+	// Basic SQL injection patterns from settings
+	const dangerousPatterns = FLEXIBLE_QUERY.DANGEROUS_PATTERNS;
 	
 	for (const pattern of dangerousPatterns) {
 		if (pattern.test(cleaned)) {

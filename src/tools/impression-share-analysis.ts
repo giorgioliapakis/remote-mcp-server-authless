@@ -160,33 +160,42 @@ performance_classified AS (
 
 -- Step 3: Analysis-specific filtering and ranking
 filtered_opportunities AS (
-  SELECT *
+  SELECT *,
+    -- Create ranking for different analysis types
+    ROW_NUMBER() OVER (
+      ORDER BY 
+        CASE 
+          WHEN '${analysis_type}' = 'budget_opportunities' THEN additional_budget_needed
+          WHEN '${analysis_type}' = 'rank_opportunities' THEN potential_clicks_from_rank
+          ELSE opportunity_score
+        END DESC
+    ) as analysis_rank
   FROM performance_classified
   WHERE 
-    CASE '${analysis_type}'
-      WHEN 'budget_opportunities' THEN 
+    CASE 
+      WHEN '${analysis_type}' = 'budget_opportunities' THEN 
         weighted_budget_lost >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD} 
         AND budget_status IN ('CONSTRAINED', 'BALANCED')
-      WHEN 'rank_opportunities' THEN 
+      WHEN '${analysis_type}' = 'rank_opportunities' THEN 
         weighted_rank_lost >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD}
         AND opportunity_type IN ('RANK_OPPORTUNITY', 'RANK_IMPROVEMENT')
-      WHEN 'regional_comparison' THEN 
+      WHEN '${analysis_type}' = 'regional_comparison' THEN 
         total_spend >= ${safeMinSpend * 2}  -- Higher threshold for regional
       ELSE 
         total_lost_share >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD / 2}  -- Overview includes all
     END
-  ORDER BY 
-    CASE '${analysis_type}'
-      WHEN 'budget_opportunities' THEN additional_budget_needed
-      WHEN 'rank_opportunities' THEN potential_clicks_from_rank
-      ELSE opportunity_score
-    END DESC
-  LIMIT CASE '${analysis_type}'
-    WHEN 'budget_opportunities' THEN ${IMPRESSION_SHARE.MAX_BUDGET_CONSTRAINED}
-    WHEN 'rank_opportunities' THEN ${IMPRESSION_SHARE.MAX_RANK_OPPORTUNITIES}
-    WHEN 'regional_comparison' THEN ${IMPRESSION_SHARE.MAX_REGIONAL_COMPARISONS}
-    ELSE ${IMPRESSION_SHARE.MAX_OPPORTUNITY_CAMPAIGNS}
-  END
+),
+
+-- Step 3b: Apply analysis-specific limits
+limited_opportunities AS (
+  SELECT * FROM filtered_opportunities
+  WHERE analysis_rank <= 
+    CASE 
+      WHEN '${analysis_type}' = 'budget_opportunities' THEN ${IMPRESSION_SHARE.MAX_BUDGET_CONSTRAINED}
+      WHEN '${analysis_type}' = 'rank_opportunities' THEN ${IMPRESSION_SHARE.MAX_RANK_OPPORTUNITIES}
+      WHEN '${analysis_type}' = 'regional_comparison' THEN ${IMPRESSION_SHARE.MAX_REGIONAL_COMPARISONS}
+      ELSE ${IMPRESSION_SHARE.MAX_OPPORTUNITY_CAMPAIGNS}
+    END
 ),
 
 -- Step 4: Regional summary (for regional_comparison and overview)
@@ -221,7 +230,7 @@ regional_summary AS (
     COUNT(CASE WHEN opportunity_type = 'OPTIMIZED' THEN 1 END) as optimized_campaigns,
     COUNT(CASE WHEN total_lost_share >= ${IMPRESSION_SHARE.HIGH_BUDGET_LOST} OR total_lost_share >= ${IMPRESSION_SHARE.HIGH_RANK_LOST} THEN 1 END) as high_opportunity_campaigns
     
-  FROM performance_classified
+  FROM limited_opportunities
   GROUP BY region
 ),
 
@@ -248,7 +257,7 @@ overall_summary AS (
     SUM(potential_clicks_from_rank) as total_rank_opportunity,
     AVG(opportunity_score) as average_opportunity_score
     
-  FROM performance_classified
+  FROM limited_opportunities
 )
 
 -- Output 1: Analysis Summary
@@ -316,7 +325,7 @@ SELECT
       'wow_change_pct', ROUND(avg_wow_change, 1)
     ) ORDER BY opportunity_score DESC)
   ) as summary_data
-FROM filtered_opportunities
+FROM limited_opportunities
 
 ${analysis_type === 'regional_comparison' || analysis_type === 'overview' ? `
 UNION ALL

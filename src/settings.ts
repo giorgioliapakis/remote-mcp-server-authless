@@ -154,10 +154,42 @@ export const DEFAULT_COUNTRIES = ['US', 'AU', 'UK'] as const;
 // Default Platforms for Analysis
 export const DEFAULT_PLATFORMS = ['Meta', 'Google', 'Bing'] as const;
 
+// Impression Share Analysis Settings
+export const IMPRESSION_SHARE = {
+	// Lost impression share thresholds for actionability
+	HIGH_BUDGET_LOST: 30.0,    // 30%+ budget lost = high priority
+	HIGH_RANK_LOST: 30.0,      // 30%+ rank lost = high priority
+	ACTIONABLE_THRESHOLD: 15.0, // 15%+ lost = actionable
+	
+	// Minimum thresholds for analysis inclusion
+	MIN_SPEND_THRESHOLD: 500,
+	MIN_IMPRESSIONS_THRESHOLD: 1000,
+	MIN_CLICKS_THRESHOLD: 10,
+	
+	// Budget optimization thresholds
+	HIGH_BUDGET_UTILIZATION: 85.0, // 85%+ = budget constrained
+	LOW_BUDGET_UTILIZATION: 60.0,  // <60% = underutilizing budget
+	
+	// Market position categories (from performance_diagnosis field)
+	MARKET_POSITIONS: {
+		DOMINANT: 'dominant',
+		COMPETITIVE: 'competitive', 
+		LAGGING: 'lagging',
+		EMERGING: 'emerging'
+	},
+	
+	// Analysis limits
+	MAX_OPPORTUNITY_CAMPAIGNS: 10,
+	MAX_BUDGET_CONSTRAINED: 8,
+	MAX_RANK_OPPORTUNITIES: 8,
+	MAX_REGIONAL_COMPARISONS: 6
+} as const;
+
 // BigQuery Configuration
 export const BIGQUERY_CONFIG = {
-	// Table reference
+	// Table references
 	BLENDED_SUMMARY_TABLE: '`exemplary-terra-463404-m1.linktree_analytics.blended_summary`',
+	IMPRESSION_SHARE_TABLE: '`exemplary-terra-463404-m1.linktree_analytics.impression_share_report`',
 	
 	// Query optimization
 	MAX_RESULTS_PER_SECTION: 20,

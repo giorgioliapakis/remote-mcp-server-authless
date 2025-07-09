@@ -5,6 +5,7 @@ import { registerCreativeAnalysisTool } from "./creative-analysis";
 import { registerRegionalComparisonTool } from "./regional-comparison";
 import { registerFlexibleQueryTool } from "./get-performance";
 import { registerAnomalyDetectionTool } from "./anomaly-detection";
+import { registerImpressionShareAnalysisTool } from "./impression-share-analysis";
 
 // Export individual tool registration functions
 export { registerWeeklyReportTool } from "./weekly-report";
@@ -13,6 +14,7 @@ export { registerCreativeAnalysisTool } from "./creative-analysis";
 export { registerRegionalComparisonTool } from "./regional-comparison";
 export { registerFlexibleQueryTool } from "./get-performance";
 export { registerAnomalyDetectionTool } from "./anomaly-detection";
+export { registerImpressionShareAnalysisTool } from "./impression-share-analysis";
 
 // Export SQL utilities for direct use if needed
 export * from "./sql-utils";
@@ -27,6 +29,7 @@ export function registerAllTools(server: McpServer) {
 	registerCreativeAnalysisTool(server);
 	registerRegionalComparisonTool(server);
 	registerAnomalyDetectionTool(server);
+	registerImpressionShareAnalysisTool(server);
 	
 	// Flexible fallback tool
 	registerFlexibleQueryTool(server);

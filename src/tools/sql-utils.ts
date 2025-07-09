@@ -2,7 +2,7 @@
  * SQL Utilities for BigQuery - Safe parameter handling and common patterns
  */
 
-import { BIGQUERY_CONFIG, PERFORMANCE_THRESHOLDS, DATE_RANGES, COMPARISON_PERIODS, FLEXIBLE_QUERY } from "../settings";
+import { BIGQUERY_CONFIG, PERFORMANCE_THRESHOLDS, DATE_RANGES, COMPARISON_PERIODS, FLEXIBLE_QUERY, IMPRESSION_SHARE } from "../settings";
 
 /**
  * Safely escape a string value for SQL LIKE queries
@@ -74,9 +74,10 @@ export function buildComparisonDateFilter(currentDays: number, totalDays: number
 }
 
 /**
- * Standard BigQuery table reference
+ * Standard BigQuery table references
  */
 export const BLENDED_SUMMARY_TABLE = BIGQUERY_CONFIG.BLENDED_SUMMARY_TABLE;
+export const IMPRESSION_SHARE_TABLE = BIGQUERY_CONFIG.IMPRESSION_SHARE_TABLE;
 
 /**
  * Common performance rating classification
@@ -184,4 +185,63 @@ export function validateAndCleanSqlQuery(query: string): string {
 	}
 	
 	return cleaned;
+}
+
+/**
+ * Impression Share Analysis Utilities
+ */
+
+/**
+ * Calculate total lost impression share safely
+ */
+export function getTotalLostImpressionShare(): string {
+	return `COALESCE(budget_lost_impression_share_pct, 0) + COALESCE(rank_lost_impression_share_pct, 0)`;
+}
+
+/**
+ * Get opportunity type based on lost impression share breakdown
+ */
+export function getOpportunityTypeCase(): string {
+	return `CASE 
+		WHEN COALESCE(budget_lost_impression_share_pct, 0) >= ${IMPRESSION_SHARE.HIGH_BUDGET_LOST} THEN 'BUDGET_OPPORTUNITY'
+		WHEN COALESCE(rank_lost_impression_share_pct, 0) >= ${IMPRESSION_SHARE.HIGH_RANK_LOST} THEN 'RANK_OPPORTUNITY'
+		WHEN COALESCE(budget_lost_impression_share_pct, 0) >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD} THEN 'BUDGET_CONSTRAINED'
+		WHEN COALESCE(rank_lost_impression_share_pct, 0) >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD} THEN 'RANK_IMPROVEMENT'
+		WHEN ${getTotalLostImpressionShare()} >= ${IMPRESSION_SHARE.ACTIONABLE_THRESHOLD} THEN 'MIXED_OPPORTUNITY'
+		ELSE 'OPTIMIZED'
+	END`;
+}
+
+/**
+ * Get budget utilization status
+ */
+export function getBudgetUtilizationStatus(): string {
+	return `CASE 
+		WHEN budget_utilization_pct >= ${IMPRESSION_SHARE.HIGH_BUDGET_UTILIZATION} THEN 'CONSTRAINED'
+		WHEN budget_utilization_pct <= ${IMPRESSION_SHARE.LOW_BUDGET_UTILIZATION} THEN 'UNDERUTILIZED'
+		ELSE 'BALANCED'
+	END`;
+}
+
+/**
+ * Safe impression share change calculation
+ */
+export function safeImpressionShareChange(currentColumn: string, previousColumn: string): string {
+	return `CASE 
+		WHEN ${previousColumn} IS NOT NULL AND ${previousColumn} > 0 THEN
+			ROUND((${currentColumn} - ${previousColumn}) / ${previousColumn} * 100, 1)
+		ELSE NULL
+	END`;
+}
+
+/**
+ * Calculate market opportunity score (0-100 scale)
+ */
+export function getMarketOpportunityScore(): string {
+	return `CASE 
+		WHEN ${getTotalLostImpressionShare()} >= 50 THEN 90 + (COALESCE(market_size_impressions, 0) / 100000)
+		WHEN ${getTotalLostImpressionShare()} >= 30 THEN 70 + (${getTotalLostImpressionShare()} * 0.5)
+		WHEN ${getTotalLostImpressionShare()} >= 15 THEN 50 + (${getTotalLostImpressionShare()} * 0.8)
+		ELSE 20 + (${getTotalLostImpressionShare()} * 1.5)
+	END`;
 } 

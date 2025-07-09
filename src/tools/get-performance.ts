@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { BLENDED_SUMMARY_TABLE, validateAndCleanSqlQuery } from "./sql-utils";
+import { BLENDED_SUMMARY_TABLE, IMPRESSION_SHARE_TABLE, validateAndCleanSqlQuery } from "./sql-utils";
 
 /**
  * Register the flexible query tool - fallback for custom analysis not covered by templates
@@ -31,11 +31,12 @@ VALID USE CASES:
 - Ad-hoc exploratory queries for data discovery
 
 SECURITY REQUIREMENTS:
-- Queries must ONLY access: ${BLENDED_SUMMARY_TABLE}
+- Queries must ONLY access: ${BLENDED_SUMMARY_TABLE} OR ${IMPRESSION_SHARE_TABLE}
 - No DDL operations (CREATE, DROP, ALTER, etc.)
 - No DML operations (INSERT, UPDATE, DELETE)
 - Use LIMIT clauses to prevent resource exhaustion
 - Avoid user-provided string literals in WHERE clauses
+- NO JOINS between tables - analyze each table separately
 
 ⚠️ COMMON BIGQUERY ERRORS TO AVOID:
 - Aggregations of aggregations: DON'T use MAX(SUM(...)) or similar nested aggregates
@@ -47,7 +48,9 @@ SECURITY REQUIREMENTS:
 - Safe division: SAFE_DIVIDE(SUM(spend), SUM(conversions))
 - Platform pivots: Use conditional SUM instead of MAX(CASE...SUM)
 
-TABLE SCHEMA (${BLENDED_SUMMARY_TABLE}):
+AVAILABLE TABLES & SCHEMAS:
+
+1. PERFORMANCE DATA (${BLENDED_SUMMARY_TABLE}):
 account_name: STRING, datasource: STRING, source: STRING, date: DATE, 
 campaign: STRING, campaign_id: STRING, adset_name: STRING, adset_id: STRING, 
 ad_name: STRING, ad_id: STRING, ad_group_name: STRING, ad_group_id: STRING, 
@@ -57,18 +60,51 @@ campaign_objective: STRING, funnel_stage: STRING, targeting_type: STRING,
 product_focus: STRING, platform: STRING, ctr_percent: BIGNUMERIC, 
 cpc: BIGNUMERIC, conversion_rate_percent: BIGNUMERIC, cpa: BIGNUMERIC
 
+2. IMPRESSION SHARE DATA (${IMPRESSION_SHARE_TABLE}):
+date: DATE, account_name: STRING, campaign: STRING, campaign_type: STRING, 
+region: STRING, campaign_category: STRING, funnel_stage: STRING, 
+clicks: NUMERIC, spend: NUMERIC, conversions: NUMERIC, budget_amount: NUMERIC,
+search_impression_share_pct: NUMERIC, search_top_impression_share_pct: NUMERIC,
+search_absolute_top_impression_share_pct: NUMERIC, budget_lost_impression_share_pct: NUMERIC,
+rank_lost_impression_share_pct: NUMERIC, budget_lost_top_impression_share_pct: NUMERIC,
+rank_lost_top_impression_share_pct: NUMERIC, budget_lost_absolute_top_impression_share_pct: NUMERIC,
+rank_lost_absolute_top_impression_share_pct: NUMERIC, market_size_impressions: NUMERIC,
+search_click_share_pct: NUMERIC, content_impression_share_pct: NUMERIC,
+content_market_size_impressions: NUMERIC, avg_cpc: NUMERIC, conversion_rate_pct: NUMERIC,
+cost_per_conversion: NUMERIC, budget_utilization_pct: NUMERIC, total_lost_impression_share_pct: NUMERIC,
+actual_impressions: NUMERIC, budget_lost_impressions: NUMERIC, rank_lost_impressions: NUMERIC,
+market_position: STRING, performance_diagnosis: STRING, is_brand_campaign: BOOLEAN,
+prev_week_impression_share: NUMERIC, wow_impression_share_change: NUMERIC,
+estimated_budget_needed_for_lost_impressions: NUMERIC, estimated_clicks_from_rank_improvement: NUMERIC
+
 EXAMPLE SAFE QUERIES:
--- Time-based analysis
+
+-- Performance table: Time-based analysis
 SELECT DATE_TRUNC(date, WEEK) as week, platform, SUM(spend) as weekly_spend
 FROM ${BLENDED_SUMMARY_TABLE}
 WHERE date >= '2024-01-01' AND date <= '2024-03-31'
 GROUP BY week, platform ORDER BY week LIMIT 20;
 
--- Platform comparison
+-- Performance table: Platform comparison
 SELECT platform, AVG(cpa) as avg_cpa, SUM(conversions) as total_conversions
 FROM ${BLENDED_SUMMARY_TABLE} 
 WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 30 DAY)
 GROUP BY platform ORDER BY avg_cpa LIMIT 10;
+
+-- Impression share table: Search visibility analysis
+SELECT region, campaign_type, AVG(search_impression_share_pct) as avg_impression_share,
+       AVG(budget_lost_impression_share_pct) as avg_budget_lost
+FROM ${IMPRESSION_SHARE_TABLE}
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)
+GROUP BY region, campaign_type ORDER BY avg_impression_share DESC LIMIT 15;
+
+-- Impression share table: Opportunity identification
+SELECT campaign, region, budget_utilization_pct, budget_lost_impression_share_pct,
+       rank_lost_impression_share_pct, estimated_budget_needed_for_lost_impressions
+FROM ${IMPRESSION_SHARE_TABLE}
+WHERE date >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY) 
+  AND budget_lost_impression_share_pct > 20
+ORDER BY estimated_budget_needed_for_lost_impressions DESC LIMIT 10;
 
 CONTEXT:
 - Current date: ${new Date().toISOString().split('T')[0]}
@@ -119,21 +155,36 @@ CONTEXT:
 					}
 				}
 				
-				// Validate table reference - check that query only references authorized table
-				const authorizedTable1 = 'exemplary-terra-463404-m1.linktree_analytics.blended_summary';
-				const authorizedTable2 = '`exemplary-terra-463404-m1.linktree_analytics.blended_summary`';
+				// Validate table reference - check that query only references authorized tables
+				const authorizedTables = [
+					'exemplary-terra-463404-m1.linktree_analytics.blended_summary',
+					'`exemplary-terra-463404-m1.linktree_analytics.blended_summary`',
+					'exemplary-terra-463404-m1.linktree_analytics.impression_share_report',
+					'`exemplary-terra-463404-m1.linktree_analytics.impression_share_report`'
+				];
 				
 				// Extract all table references (looking for database.schema.table patterns)
 				const tableReferences = cleanQuery.match(/(?:`[^`]+`\.`[^`]+`\.`[^`]+`|[\w-]+\.[\w-]+\.[\w-]+)/gi) || [];
 				const unauthorizedTables = tableReferences.filter(table => 
-					!table.includes('exemplary-terra-463404-m1.linktree_analytics.blended_summary')
+					!authorizedTables.some(authTable => table.includes(authTable.replace(/`/g, '')))
 				);
 				
 				if (unauthorizedTables.length > 0) {
 					return {
 						content: [{
 							type: "text",
-							text: `Security Error: Only the specified analytics table is allowed\n\nUnauthorized tables detected: ${unauthorizedTables.join(', ')}\nQuery rejected for security reasons. Please use the specialized template tools or modify your query to comply with security requirements.`
+							text: `Security Error: Only the specified analytics tables are allowed\n\nUnauthorized tables detected: ${unauthorizedTables.join(', ')}\nAllowed tables: ${BLENDED_SUMMARY_TABLE}, ${IMPRESSION_SHARE_TABLE}\nQuery rejected for security reasons. Please use the specialized template tools or modify your query to comply with security requirements.`
+						}]
+					};
+				}
+				
+				// Check for JOIN operations between tables (not allowed)
+				const hasJoin = /\bJOIN\b/i.test(cleanQuery);
+				if (hasJoin && tableReferences.length > 1) {
+					return {
+						content: [{
+							type: "text",
+							text: `Security Error: JOINs between different tables are not allowed\n\nAnalyze each table separately using the specialized tools instead. Query rejected for security reasons.`
 						}]
 					};
 				}
@@ -153,11 +204,12 @@ CONTEXT:
 				}
 				
 				// Validate table reference exists in query
-				if (!cleanQuery.includes(authorizedTable1) && !cleanQuery.includes(authorizedTable2)) {
+				const hasValidTable = authorizedTables.some(table => cleanQuery.includes(table));
+				if (!hasValidTable) {
 					return {
 						content: [{
 							type: "text",
-							text: `Table Reference Error: Query must reference the authorized table: ${BLENDED_SUMMARY_TABLE}\n\nPlease update your query to use the correct table reference.`
+							text: `Table Reference Error: Query must reference one of the authorized tables: ${BLENDED_SUMMARY_TABLE} or ${IMPRESSION_SHARE_TABLE}\n\nPlease update your query to use the correct table reference.`
 						}]
 					};
 				}

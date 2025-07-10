@@ -9,7 +9,6 @@ import {
 	getOpportunityTypeCase,
 	getBudgetUtilizationStatus,
 	getTotalLostImpressionShare,
-	safeImpressionShareChange,
 	getMarketOpportunityScore,
 	safeCpaCalculation,
 	validateAndCleanInput
